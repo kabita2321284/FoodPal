@@ -1,13 +1,13 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   AlertCircle,
   CheckCircle2,
   CreditCard,
-  Home,
   MapPin,
   MessageSquare,
   Phone,
+  Search,
   ShoppingBag,
   Store,
   Truck,
@@ -28,11 +28,52 @@ type CartItem = {
   restaurant?: string;
 };
 
+type AddressSuggestion = {
+  description: string;
+  placeId: string;
+};
+
 const API_URL =
   import.meta.env.VITE_API_URL ||
   (import.meta.env.PROD ? "" : "http://localhost:3000");
 
+const GOOGLE_MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+
 const addressLabels = ["Home", "Work", "Hotel", "Other"];
+
+const loadGoogleMapsScript = () => {
+  return new Promise<void>((resolve, reject) => {
+    const existingGoogle = (window as any).google;
+
+    if (existingGoogle?.maps?.places) {
+      resolve();
+      return;
+    }
+
+    const existingScript = document.getElementById("google-maps-script");
+
+    if (existingScript) {
+      existingScript.addEventListener("load", () => resolve(), { once: true });
+      existingScript.addEventListener("error", reject, { once: true });
+      return;
+    }
+
+    if (!GOOGLE_MAPS_KEY) {
+      reject(new Error("Missing VITE_GOOGLE_MAPS_API_KEY"));
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.id = "google-maps-script";
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_KEY}&libraries=places`;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve();
+    script.onerror = reject;
+
+    document.head.appendChild(script);
+  });
+};
 
 export default function CheckoutPage() {
   const navigate = useNavigate();
@@ -41,6 +82,14 @@ export default function CheckoutPage() {
   const [address, setAddress] = useState("");
   const [city, setCity] = useState("");
   const [postcode, setPostcode] = useState("");
+  const [placeId, setPlaceId] = useState("");
+  const [lat, setLat] = useState<number | null>(null);
+  const [lng, setLng] = useState<number | null>(null);
+
+  const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
+  const [mapsReady, setMapsReady] = useState(false);
+  const [addressSearching, setAddressSearching] = useState(false);
+
   const [phone, setPhone] = useState("");
   const [instructions, setInstructions] = useState("");
   const [note, setNote] = useState("");
@@ -49,6 +98,10 @@ export default function CheckoutPage() {
   );
   const [loading, setLoading] = useState(false);
   const [formError, setFormError] = useState("");
+
+  const autocompleteServiceRef = useRef<any>(null);
+  const placesServiceRef = useRef<any>(null);
+  const placesDivRef = useRef<HTMLDivElement | null>(null);
 
   const cart: CartItem[] = useMemo(() => {
     try {
@@ -62,6 +115,74 @@ export default function CheckoutPage() {
       return [];
     }
   }, []);
+
+  useEffect(() => {
+    loadGoogleMapsScript()
+      .then(() => {
+        const google = (window as any).google;
+
+        autocompleteServiceRef.current =
+          new google.maps.places.AutocompleteService();
+
+        placesServiceRef.current = new google.maps.places.PlacesService(
+          placesDivRef.current || document.createElement("div")
+        );
+
+        setMapsReady(true);
+      })
+      .catch((error) => {
+        console.error("Google Places failed:", error);
+        setMapsReady(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!mapsReady || !autocompleteServiceRef.current) return;
+
+    const query = address.trim();
+
+    setPlaceId("");
+    setLat(null);
+    setLng(null);
+
+    if (query.length < 3) {
+      setSuggestions([]);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setAddressSearching(true);
+
+      autocompleteServiceRef.current.getPlacePredictions(
+        {
+          input: query,
+          types: ["address"],
+        },
+        (predictions: any[], status: string) => {
+          const google = (window as any).google;
+
+          setAddressSearching(false);
+
+          if (
+            status !== google.maps.places.PlacesServiceStatus.OK ||
+            !Array.isArray(predictions)
+          ) {
+            setSuggestions([]);
+            return;
+          }
+
+          setSuggestions(
+            predictions.slice(0, 6).map((item) => ({
+              description: item.description,
+              placeId: item.place_id,
+            }))
+          );
+        }
+      );
+    }, 350);
+
+    return () => window.clearTimeout(timer);
+  }, [address, mapsReady]);
 
   const subtotal = cart.reduce(
     (sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 1),
@@ -80,6 +201,59 @@ export default function CheckoutPage() {
 
   const getRestaurantId = () => {
     return cart[0]?.restaurantId || cart[0]?.restaurant || "";
+  };
+
+  const selectSuggestion = (suggestion: AddressSuggestion) => {
+    setAddress(suggestion.description);
+    setPlaceId(suggestion.placeId);
+    setSuggestions([]);
+
+    if (!placesServiceRef.current) return;
+
+    placesServiceRef.current.getDetails(
+      {
+        placeId: suggestion.placeId,
+        fields: ["formatted_address", "geometry", "address_components"],
+      },
+      (place: any, status: string) => {
+        const google = (window as any).google;
+
+        if (status !== google.maps.places.PlacesServiceStatus.OK || !place) {
+          return;
+        }
+
+        const formattedAddress = place.formatted_address || suggestion.description;
+        const location = place.geometry?.location;
+
+        setAddress(formattedAddress);
+
+        if (location) {
+          setLat(Number(location.lat()));
+          setLng(Number(location.lng()));
+        }
+
+        const components = place.address_components || [];
+
+        const getComponent = (types: string[]) => {
+          const found = components.find((component: any) =>
+            types.some((type) => component.types.includes(type))
+          );
+
+          return found?.long_name || "";
+        };
+
+        const foundCity =
+          getComponent(["locality"]) ||
+          getComponent(["postal_town"]) ||
+          getComponent(["administrative_area_level_2"]) ||
+          getComponent(["administrative_area_level_1"]);
+
+        const foundPostcode = getComponent(["postal_code"]);
+
+        if (foundCity) setCity(foundCity);
+        if (foundPostcode) setPostcode(foundPostcode);
+      }
+    );
   };
 
   const phoneIsValid = phone.replace(/\D/g, "").length >= 7;
@@ -123,11 +297,7 @@ export default function CheckoutPage() {
         localStorage.getItem("foodpal_token") ||
         localStorage.getItem("authToken");
 
-      const fullAddress = [
-        address.trim(),
-        city.trim(),
-        postcode.trim(),
-      ]
+      const fullAddress = [address.trim(), city.trim(), postcode.trim()]
         .filter(Boolean)
         .join(", ");
 
@@ -150,6 +320,9 @@ export default function CheckoutPage() {
           label: addressLabel,
           text: fullAddress,
           city,
+          lat,
+          lng,
+          placeId,
           phone,
           instructions,
         },
@@ -206,6 +379,8 @@ export default function CheckoutPage() {
 
   return (
     <div className="min-h-screen bg-[#f7f7f8] px-4 py-8">
+      <div ref={placesDivRef} className="hidden" />
+
       <div className="mx-auto max-w-6xl">
         <div className="mb-8 flex flex-col gap-2">
           <p className="text-sm font-black uppercase tracking-[0.25em] text-orange-500">
@@ -238,7 +413,7 @@ export default function CheckoutPage() {
                     Delivery address
                   </h2>
                   <p className="text-sm font-semibold text-gray-500">
-                    Riders need clear address details for faster delivery.
+                    Start typing and select a real address for accurate live map.
                   </p>
                 </div>
               </div>
@@ -261,24 +436,64 @@ export default function CheckoutPage() {
               </div>
 
               <div className="grid gap-4">
-                <div>
+                <div className="relative">
                   <label className="mb-2 block text-sm font-black text-gray-800">
-                    Full delivery address *
+                    Search delivery address *
                   </label>
-                  <textarea
-                    className={`w-full rounded-2xl border p-4 text-sm font-semibold outline-none transition focus:border-orange-500 ${
+
+                  <div
+                    className={`flex items-start rounded-2xl border bg-white transition focus-within:border-orange-500 ${
                       address && !addressIsValid
                         ? "border-red-300"
                         : "border-gray-200"
                     }`}
-                    rows={3}
-                    placeholder="Flat/house number, street, area, landmark"
-                    value={address}
-                    onChange={(e) => setAddress(e.target.value)}
-                  />
-                  <p className="mt-2 text-xs font-semibold text-gray-400">
-                    Example: Flat 3A, Steel Road, near Tesco entrance.
-                  </p>
+                  >
+                    <Search className="ml-4 mt-4 text-gray-400" size={20} />
+                    <textarea
+                      className="w-full resize-none rounded-2xl p-4 pl-3 text-sm font-semibold outline-none"
+                      rows={3}
+                      placeholder="Start typing: 318 Summerwood..."
+                      value={address}
+                      onChange={(e) => setAddress(e.target.value)}
+                    />
+                  </div>
+
+                  {addressSearching && (
+                    <p className="mt-2 text-xs font-bold text-orange-500">
+                      Searching addresses...
+                    </p>
+                  )}
+
+                  {suggestions.length > 0 && (
+                    <div className="absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-3xl border border-gray-100 bg-white shadow-2xl">
+                      {suggestions.map((suggestion) => (
+                        <button
+                          key={suggestion.placeId}
+                          type="button"
+                          onClick={() => selectSuggestion(suggestion)}
+                          className="flex w-full items-start gap-3 border-b border-gray-50 px-4 py-4 text-left hover:bg-orange-50"
+                        >
+                          <MapPin
+                            size={18}
+                            className="mt-0.5 shrink-0 text-orange-500"
+                          />
+                          <span className="text-sm font-bold text-gray-800">
+                            {suggestion.description}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {lat && lng ? (
+                    <p className="mt-2 text-xs font-bold text-green-600">
+                      Address selected for map tracking.
+                    </p>
+                  ) : (
+                    <p className="mt-2 text-xs font-semibold text-gray-400">
+                      Select one suggestion to save map coordinates.
+                    </p>
+                  )}
                 </div>
 
                 <div className="grid gap-4 md:grid-cols-2">
@@ -288,7 +503,7 @@ export default function CheckoutPage() {
                     </label>
                     <input
                       className="w-full rounded-2xl border border-gray-200 p-4 text-sm font-semibold outline-none transition focus:border-orange-500"
-                      placeholder="Kathmandu, London, etc."
+                      placeholder="Auto-filled after address selection"
                       value={city}
                       onChange={(e) => setCity(e.target.value)}
                     />
@@ -300,7 +515,7 @@ export default function CheckoutPage() {
                     </label>
                     <input
                       className="w-full rounded-2xl border border-gray-200 p-4 text-sm font-semibold outline-none transition focus:border-orange-500"
-                      placeholder="Optional"
+                      placeholder="Auto-filled if available"
                       value={postcode}
                       onChange={(e) => setPostcode(e.target.value)}
                     />
