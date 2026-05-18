@@ -110,7 +110,7 @@ const currencyConversionSchema = new mongoose.Schema(
 
     paymentCurrency: {
       type: String,
-      default: "GBP",
+      default: "NPR",
       trim: true,
       uppercase: true,
       enum: SUPPORTED_CURRENCIES,
@@ -142,7 +142,7 @@ const currencyConversionSchema = new mongoose.Schema(
 
     provider: {
       type: String,
-      default: "fallback",
+      default: "none",
       trim: true,
     },
 
@@ -312,7 +312,16 @@ const OrderSchema = new mongoose.Schema(
       },
     ],
 
-    items: [orderItemSchema],
+    items: {
+      type: [orderItemSchema],
+      default: [],
+      validate: {
+        validator: function (items: any[]) {
+          return Array.isArray(items) && items.length > 0;
+        },
+        message: "Order must contain at least one item.",
+      },
+    },
 
     subtotal: {
       type: Number,
@@ -328,7 +337,7 @@ const OrderSchema = new mongoose.Schema(
 
     platformFee: {
       type: Number,
-      default: 10,
+      default: 0,
       min: 0,
     },
 
@@ -356,10 +365,6 @@ const OrderSchema = new mongoose.Schema(
       min: 0,
     },
 
-    /**
-     * Main app/base currency.
-     * All FoodPal prices are stored/calculated in NPR.
-     */
     currency: {
       type: String,
       default: "NPR",
@@ -368,10 +373,14 @@ const OrderSchema = new mongoose.Schema(
       enum: SUPPORTED_CURRENCIES,
     },
 
-    /**
-     * Currency customer selected for online payment.
-     * Example: GBP, USD, EUR, INR, AUD, CAD, AED, JPY.
-     */
+    baseCurrency: {
+      type: String,
+      default: "NPR",
+      trim: true,
+      uppercase: true,
+      enum: SUPPORTED_CURRENCIES,
+    },
+
     paymentCurrency: {
       type: String,
       default: "NPR",
@@ -381,22 +390,12 @@ const OrderSchema = new mongoose.Schema(
       index: true,
     },
 
-    /**
-     * Converted amount displayed/charged by payment provider.
-     * Example: Rs. 1000 NPR converted to £5.80 GBP.
-     */
     convertedPaymentAmount: {
       type: Number,
       default: 0,
       min: 0,
     },
 
-    /**
-     * Provider minor unit amount.
-     * Stripe needs this:
-     * GBP/USD/EUR = cents/pence
-     * JPY = no decimal
-     */
     convertedPaymentMinorAmount: {
       type: Number,
       default: 0,
@@ -588,7 +587,10 @@ const OrderSchema = new mongoose.Schema(
       trim: true,
     },
 
-    paymentHistory: [paymentHistorySchema],
+    paymentHistory: {
+      type: [paymentHistorySchema],
+      default: [],
+    },
 
     estimatedTime: {
       type: Number,
@@ -614,7 +616,10 @@ const OrderSchema = new mongoose.Schema(
       min: 0,
     },
 
-    trackingEvents: [trackingEventSchema],
+    trackingEvents: {
+      type: [trackingEventSchema],
+      default: [],
+    },
 
     riderLocation: {
       lat: {
@@ -664,6 +669,46 @@ const OrderSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+OrderSchema.pre("validate", function (next) {
+  const order: any = this;
+
+  order.currency = String(order.currency || "NPR").toUpperCase();
+  order.baseCurrency = String(order.baseCurrency || "NPR").toUpperCase();
+  order.paymentCurrency = String(order.paymentCurrency || order.currency || "NPR").toUpperCase();
+
+  order.subtotal = Number(order.subtotal || 0);
+  order.deliveryFee = Number(order.deliveryFee || 0);
+  order.platformFee = Number(order.platformFee || 0);
+  order.discountAmount = Number(order.discountAmount || 0);
+  order.taxAmount = Number(order.taxAmount || 0);
+  order.surgeFee = Number(order.surgeFee || 0);
+
+  if (!order.totalAmount || Number(order.totalAmount) <= 0) {
+    order.totalAmount =
+      order.subtotal +
+      order.deliveryFee +
+      order.platformFee +
+      order.taxAmount +
+      order.surgeFee -
+      order.discountAmount;
+  }
+
+  if (!order.currencyConversion) {
+    order.currencyConversion = {
+      baseCurrency: order.baseCurrency || "NPR",
+      paymentCurrency: order.paymentCurrency || "NPR",
+      exchangeRate: order.exchangeRate || 1,
+      baseAmount: order.totalAmount || 0,
+      convertedAmount: order.convertedPaymentAmount || order.totalAmount || 0,
+      convertedMinorAmount: order.convertedPaymentMinorAmount || 0,
+      provider: "none",
+      convertedAt: new Date(),
+    };
+  }
+
+  next();
+});
 
 OrderSchema.index({ customer: 1, createdAt: -1 });
 OrderSchema.index({ restaurant: 1, createdAt: -1 });
