@@ -1,8 +1,11 @@
 import dotenv from "dotenv";
 dotenv.config();
+
 import favoriteRoutes from "./server/routes/favoriteRoutes.js";
 import reviewRoutes from "./server/routes/reviewRoutes.js";
 import promoRoutes from "./server/routes/promoRoutes.js";
+import chatRoutes from "./server/routes/chatRoutes.js";
+
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -21,7 +24,6 @@ import uploadRoutes from "./server/routes/uploadRoutes.js";
 import adminRoutes from "./server/routes/adminRoutes.js";
 import riderRoutes from "./server/routes/riderRoutes.js";
 import { seedAdmin } from "./server/utils/seedAdmin.js";
-
 
 connectDB().then(() => {
   seedAdmin();
@@ -68,7 +70,6 @@ async function startServer() {
     })
   );
 
-  // Stripe webhook needs raw body BEFORE express.json()
   app.use(
     "/api/payments/stripe/webhook",
     express.raw({ type: "application/json" })
@@ -84,6 +85,7 @@ async function startServer() {
       message: "FoodPal Server is running",
       socket: "enabled",
       payment: "enabled",
+      chat: "enabled",
       time: new Date().toISOString(),
     });
   });
@@ -91,6 +93,7 @@ async function startServer() {
   app.use("/api/favorites", favoriteRoutes);
   app.use("/api/reviews", reviewRoutes);
   app.use("/api/promos", promoRoutes);
+  app.use("/api/chats", chatRoutes);
   app.use("/api/auth", authRoutes);
   app.use("/api/users", userRoutes);
   app.use("/api/restaurants", restaurantRoutes);
@@ -147,13 +150,68 @@ async function startServer() {
     socket.on("order:join", (orderId) => {
       if (!orderId) return;
       socket.join(buildRoom("order", String(orderId)));
+      socket.join(buildRoom("chat", String(orderId)));
       console.log(`Socket ${socket.id} joined order_${orderId}`);
+      console.log(`Socket ${socket.id} joined chat_${orderId}`);
     });
 
     socket.on("order:leave", (orderId) => {
       if (!orderId) return;
       socket.leave(buildRoom("order", String(orderId)));
+      socket.leave(buildRoom("chat", String(orderId)));
       console.log(`Socket ${socket.id} left order_${orderId}`);
+      console.log(`Socket ${socket.id} left chat_${orderId}`);
+    });
+
+    socket.on("chat:join", (orderId) => {
+      if (!orderId) return;
+      socket.join(buildRoom("chat", String(orderId)));
+      console.log(`Socket ${socket.id} joined chat_${orderId}`);
+    });
+
+    socket.on("chat:leave", (orderId) => {
+      if (!orderId) return;
+      socket.leave(buildRoom("chat", String(orderId)));
+      console.log(`Socket ${socket.id} left chat_${orderId}`);
+    });
+
+    socket.on("chat:typing", (data) => {
+      const { orderId, userId, name, role, isTyping } = data || {};
+      if (!orderId) return;
+
+      socket.to(buildRoom("chat", String(orderId))).emit("chat:typing", {
+        orderId,
+        userId,
+        name,
+        role,
+        isTyping: Boolean(isTyping),
+        updatedAt: new Date(),
+      });
+    });
+
+    socket.on("chat:message_sent", (message) => {
+      const orderId = message?.order || message?.orderId;
+      if (!orderId) return;
+
+      io.to(buildRoom("chat", String(orderId))).emit("chat:new_message", {
+        ...message,
+        orderId,
+        createdAt: message?.createdAt || new Date(),
+      });
+    });
+
+    socket.on("chat:call_request", (data) => {
+      const { orderId, fromUserId, fromName, fromRole, callType } = data || {};
+      if (!orderId) return;
+
+      io.to(buildRoom("chat", String(orderId))).emit("chat:call_request", {
+        orderId,
+        fromUserId,
+        fromName,
+        fromRole,
+        callType: callType || "phone",
+        createdAt: new Date(),
+      });
     });
 
     socket.on("payment:completed", (data) => {
@@ -170,10 +228,7 @@ async function startServer() {
           "payment:completed",
           payload
         );
-        io.to(buildRoom("order", String(orderId))).emit(
-          "order:updated",
-          payload
-        );
+        io.to(buildRoom("order", String(orderId))).emit("order:updated", payload);
       }
 
       io.to("admin_room").emit("payment:completed", payload);
@@ -281,6 +336,7 @@ async function startServer() {
         payload
       );
 
+      io.to(buildRoom("order", String(orderId))).emit("order:updated", payload);
       io.to("admin_room").emit("order:updated", payload);
 
       const finalUserId = userId || customerId;
@@ -290,6 +346,7 @@ async function startServer() {
           title: "Order Update",
           message: `Your order is now ${String(status).replaceAll("_", " ")}`,
           orderId,
+          createdAt: new Date(),
         });
       }
 
@@ -301,14 +358,8 @@ async function startServer() {
       }
 
       if (riderId) {
-        io.to(buildRoom("rider", String(riderId))).emit(
-          "order:updated",
-          payload
-        );
-        io.to(buildRoom("user", String(riderId))).emit(
-          "order:updated",
-          payload
-        );
+        io.to(buildRoom("rider", String(riderId))).emit("order:updated", payload);
+        io.to(buildRoom("user", String(riderId))).emit("order:updated", payload);
       }
 
       console.log(`🔄 Order ${orderId} updated to ${status}`);
@@ -325,6 +376,15 @@ async function startServer() {
       };
 
       io.to(buildRoom("order", String(orderId))).emit("order:assigned", payload);
+      io.to(buildRoom("order", String(orderId))).emit("order:updated", payload);
+      io.to(buildRoom("chat", String(orderId))).emit("chat:participant_added", {
+        orderId,
+        riderId,
+        role: "RIDER",
+        message: "Rider joined this order chat.",
+        createdAt: new Date(),
+      });
+
       io.to("admin_room").emit("order:updated", payload);
 
       if (customerId) {
@@ -332,6 +392,7 @@ async function startServer() {
           title: "Rider Assigned",
           message: "A rider has been assigned to your order.",
           orderId,
+          createdAt: new Date(),
         });
       }
 
@@ -343,14 +404,12 @@ async function startServer() {
       }
 
       if (riderId) {
-        io.to(buildRoom("rider", String(riderId))).emit(
-          "order:assigned",
-          payload
-        );
+        io.to(buildRoom("rider", String(riderId))).emit("order:assigned", payload);
         io.to(buildRoom("user", String(riderId))).emit("notification", {
           title: "New Delivery Assigned",
           message: "A new delivery has been assigned to you.",
           orderId,
+          createdAt: new Date(),
         });
       }
     });
@@ -392,6 +451,7 @@ async function startServer() {
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`FoodPal running on http://localhost:${PORT}`);
     console.log("Socket.IO live tracking enabled");
+    console.log("Order chat enabled");
     console.log("Payments enabled: Stripe + Khalti + eSewa");
   });
 }
