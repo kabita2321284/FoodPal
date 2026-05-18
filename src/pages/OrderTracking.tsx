@@ -9,12 +9,13 @@ import {
   Store,
   Home,
   Clock,
-  Navigation,
   Route,
   Timer,
   ArrowLeft,
   RefreshCw,
   MapPin,
+  Send,
+  MessageCircle,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { OrderTimeline } from "../components/OrderTimeline";
@@ -28,6 +29,18 @@ type RouteInfo = {
   distanceText: string;
   durationText: string;
   durationMinutes: number;
+};
+
+type ChatMessage = {
+  _id?: string;
+  order?: string;
+  orderId?: string;
+  sender?: any;
+  senderName: string;
+  senderRole: string;
+  message: string;
+  messageType?: string;
+  createdAt?: string;
 };
 
 const isValidCoordinate = (lat: any, lng: any) => {
@@ -82,9 +95,7 @@ const distanceKm = (from: LatLng, to: LatLng) => {
 };
 
 const makeGoogleMapUrl = (coords: LatLng | null, text?: string) => {
-  if (coords) {
-    return `https://www.google.com/maps?q=${coords.lat},${coords.lng}`;
-  }
+  if (coords) return `https://www.google.com/maps?q=${coords.lat},${coords.lng}`;
 
   if (text) {
     return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
@@ -180,14 +191,8 @@ const calculateFallbackEta = (order: any, routeMinutes?: number | null) => {
     return Math.max(10, prepTime + busyExtra + pickupBuffer + deliveryMinutes);
   }
 
-  if (status === "READY_FOR_PICKUP") {
-    return Math.max(8, pickupBuffer + deliveryMinutes);
-  }
-
-  if (status === "PICKED_UP" || status === "ON_THE_WAY") {
-    return Math.max(3, deliveryMinutes);
-  }
-
+  if (status === "READY_FOR_PICKUP") return Math.max(8, pickupBuffer + deliveryMinutes);
+  if (status === "PICKED_UP" || status === "ON_THE_WAY") return Math.max(3, deliveryMinutes);
   if (status === "DELIVERED") return 0;
 
   return Number(order?.estimatedTime || 30);
@@ -227,7 +232,6 @@ const LiveOrderMap = ({
         await loadGoogleMapsScript();
 
         const google = (window as any).google;
-
         const center =
           riderCoords || restaurantCoords || deliveryCoords || {
             lat: 51.5074,
@@ -312,9 +316,7 @@ const LiveOrderMap = ({
           bounds.extend(riderCoords);
         }
 
-        if (!bounds.isEmpty()) {
-          googleMapRef.current.fitBounds(bounds);
-        }
+        if (!bounds.isEmpty()) googleMapRef.current.fitBounds(bounds);
 
         const origin = riderCoords || restaurantCoords;
         const destination = deliveryCoords;
@@ -337,9 +339,7 @@ const LiveOrderMap = ({
                 onRouteInfo({
                   distanceText: leg?.distance?.text || "",
                   durationText: leg?.duration?.text || "",
-                  durationMinutes: Math.ceil(
-                    Number(leg?.duration?.value || 0) / 60
-                  ),
+                  durationMinutes: Math.ceil(Number(leg?.duration?.value || 0) / 60),
                 });
               } else {
                 onRouteInfo(null);
@@ -375,6 +375,11 @@ export const OrderTracking: React.FC = () => {
   const [lastUpdated, setLastUpdated] = useState<string>("");
   const [refreshing, setRefreshing] = useState(false);
 
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+
   const fetchOrder = async (silent = false) => {
     if (!id) return;
 
@@ -388,9 +393,7 @@ export const OrderTracking: React.FC = () => {
       setOrder(data);
 
       const existingRiderCoords = getLatLng(data?.riderLocation);
-      if (existingRiderCoords) {
-        setLiveRiderCoords(existingRiderCoords);
-      }
+      if (existingRiderCoords) setLiveRiderCoords(existingRiderCoords);
 
       setLastUpdated(new Date().toISOString());
     } catch (error) {
@@ -402,9 +405,70 @@ export const OrderTracking: React.FC = () => {
     }
   };
 
+  const fetchChatMessages = async () => {
+    if (!id) return;
+
+    try {
+      const data = await apiRequest(`/api/chats/order/${id}`, {
+        token: user?.token,
+      });
+
+      setChatMessages(data.messages || []);
+    } catch (error) {
+      console.error("Could not load chat:", error);
+    }
+  };
+
+  const sendChatMessage = async () => {
+    if (!id || !chatInput.trim()) return;
+
+    const text = chatInput.trim();
+    setChatInput("");
+
+    try {
+      setChatLoading(true);
+
+      await apiRequest(`/api/chats/order/${id}`, {
+        method: "POST",
+        token: user?.token,
+        body: JSON.stringify({
+          message: text,
+          messageType: "TEXT",
+        }),
+      });
+    } catch (error: any) {
+      console.error("Send chat failed:", error);
+      alert(error.message || "Could not send message.");
+      setChatInput(text);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
+  const requestCall = async () => {
+    if (!id) return;
+
+    try {
+      await apiRequest(`/api/chats/order/${id}/call-request`, {
+        method: "POST",
+        token: user?.token,
+        body: JSON.stringify({
+          callType: "phone",
+        }),
+      });
+    } catch (error: any) {
+      alert(error.message || "Could not request call.");
+    }
+  };
+
   useEffect(() => {
     fetchOrder();
+    fetchChatMessages();
   }, [id]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
 
   useEffect(() => {
     if (!id) return;
@@ -412,6 +476,7 @@ export const OrderTracking: React.FC = () => {
     const socket = getSocket();
 
     joinOrderRoom(id);
+    socket.emit("chat:join", id);
 
     const handleOrderUpdate = (updatedOrder: any) => {
       if (!updatedOrder) return;
@@ -425,9 +490,7 @@ export const OrderTracking: React.FC = () => {
       }));
 
       const riderCoords = getLatLng(updatedOrder?.riderLocation);
-      if (riderCoords) {
-        setLiveRiderCoords(riderCoords);
-      }
+      if (riderCoords) setLiveRiderCoords(riderCoords);
 
       setLastUpdated(new Date().toISOString());
     };
@@ -461,16 +524,37 @@ export const OrderTracking: React.FC = () => {
       }
     };
 
+    const handleNewChatMessage = (message: ChatMessage) => {
+      const messageOrderId = message?.order || message?.orderId;
+      if (String(messageOrderId) !== String(id)) return;
+
+      setChatMessages((prev) => {
+        if (message._id && prev.some((m) => m._id === message._id)) return prev;
+        return [...prev, message];
+      });
+    };
+
+    const handleCallRequest = (payload: any) => {
+      if (String(payload?.orderId) !== String(id)) return;
+      console.log("Call request:", payload);
+    };
+
     socket.on("order:status_update", handleOrderUpdate);
     socket.on("order:updated", handleOrderUpdate);
     socket.on("order:assigned", handleOrderUpdate);
     socket.on("rider:location_update", handleRiderLocation);
+    socket.on("chat:new_message", handleNewChatMessage);
+    socket.on("chat:call_request", handleCallRequest);
 
     return () => {
       socket.off("order:status_update", handleOrderUpdate);
       socket.off("order:updated", handleOrderUpdate);
       socket.off("order:assigned", handleOrderUpdate);
       socket.off("rider:location_update", handleRiderLocation);
+      socket.off("chat:new_message", handleNewChatMessage);
+      socket.off("chat:call_request", handleCallRequest);
+
+      socket.emit("chat:leave", id);
       leaveOrderRoom(id);
     };
   }, [id]);
@@ -483,23 +567,15 @@ export const OrderTracking: React.FC = () => {
     );
   }, [order]);
 
-  const deliveryCoords = useMemo(() => {
-    return getLatLng(order?.deliveryAddress);
-  }, [order]);
+  const deliveryCoords = useMemo(() => getLatLng(order?.deliveryAddress), [order]);
 
   const riderCoords = useMemo(() => {
     return liveRiderCoords || getLatLng(order?.riderLocation);
   }, [liveRiderCoords, order]);
 
   const fallbackDistanceKm = useMemo(() => {
-    if (riderCoords && deliveryCoords) {
-      return distanceKm(riderCoords, deliveryCoords);
-    }
-
-    if (restaurantCoords && deliveryCoords) {
-      return distanceKm(restaurantCoords, deliveryCoords);
-    }
-
+    if (riderCoords && deliveryCoords) return distanceKm(riderCoords, deliveryCoords);
+    if (restaurantCoords && deliveryCoords) return distanceKm(restaurantCoords, deliveryCoords);
     return Number(order?.deliveryDistanceKm || 0);
   }, [riderCoords, restaurantCoords, deliveryCoords, order]);
 
@@ -578,10 +654,7 @@ export const OrderTracking: React.FC = () => {
                   disabled={refreshing}
                   className="px-5 py-3 rounded-2xl bg-gray-100 font-black flex items-center justify-center gap-2 disabled:opacity-60"
                 >
-                  <RefreshCw
-                    size={18}
-                    className={refreshing ? "animate-spin" : ""}
-                  />
+                  <RefreshCw size={18} className={refreshing ? "animate-spin" : ""} />
                   Refresh
                 </button>
               </div>
@@ -589,30 +662,21 @@ export const OrderTracking: React.FC = () => {
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="bg-orange-50 rounded-3xl p-5">
                   <Timer className="text-orange-500 mb-3" size={26} />
-                  <p className="text-xs font-black uppercase text-orange-500">
-                    ETA
-                  </p>
-                  <p className="text-3xl font-black mt-1">
-                    {formatEtaText(etaMinutes)}
-                  </p>
+                  <p className="text-xs font-black uppercase text-orange-500">ETA</p>
+                  <p className="text-3xl font-black mt-1">{formatEtaText(etaMinutes)}</p>
                 </div>
 
                 <div className="bg-gray-50 rounded-3xl p-5">
                   <Route className="text-gray-500 mb-3" size={26} />
-                  <p className="text-xs font-black uppercase text-gray-500">
-                    Distance
-                  </p>
+                  <p className="text-xs font-black uppercase text-gray-500">Distance</p>
                   <p className="text-2xl font-black mt-1">
-                    {routeInfo?.distanceText ||
-                      `${fallbackDistanceKm.toFixed(1)} km`}
+                    {routeInfo?.distanceText || `${fallbackDistanceKm.toFixed(1)} km`}
                   </p>
                 </div>
 
                 <div className="bg-gray-50 rounded-3xl p-5">
                   <Clock className="text-gray-500 mb-3" size={26} />
-                  <p className="text-xs font-black uppercase text-gray-500">
-                    Status
-                  </p>
+                  <p className="text-xs font-black uppercase text-gray-500">Status</p>
                   <p className="text-xl font-black mt-1">
                     {String(order.status).replaceAll("_", " ")}
                   </p>
@@ -668,11 +732,109 @@ export const OrderTracking: React.FC = () => {
                 <Bike className="text-blue-500 mb-3" size={24} />
                 <p className="font-black">Rider</p>
                 <p className="text-sm text-gray-500 mt-1">
-                  {riderCoords
-                    ? "Live location available"
-                    : "Waiting for rider location"}
+                  {riderCoords ? "Live location available" : "Waiting for rider location"}
                 </p>
               </a>
+            </div>
+
+            <div className="bg-white rounded-[36px] p-6 shadow-sm border border-gray-100">
+              <div className="flex items-center justify-between gap-4 mb-5">
+                <div className="flex items-center gap-3">
+                  <MessageCircle className="text-orange-500" size={24} />
+                  <div>
+                    <h2 className="text-xl font-black">Order chat</h2>
+                    <p className="text-xs text-gray-500 font-bold">
+                      Customer, restaurant, and rider messages stay saved here.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  onClick={requestCall}
+                  className="px-4 py-3 rounded-2xl bg-green-500 text-white font-black flex items-center gap-2"
+                >
+                  <Phone size={18} />
+                  Call
+                </button>
+              </div>
+
+              <div className="h-[360px] overflow-y-auto bg-gray-50 rounded-3xl p-4 space-y-3">
+                {chatMessages.length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-center text-gray-400 font-bold">
+                    No messages yet. Start chat for this order.
+                  </div>
+                ) : (
+                  chatMessages.map((msg, index) => {
+                    const senderId =
+                      typeof msg.sender === "object" ? msg.sender?._id : msg.sender;
+                    const myId = user?._id || user?.id;
+                    const isMine = String(senderId) === String(myId);
+
+                    return (
+                      <div
+                        key={msg._id || index}
+                        className={`flex ${isMine ? "justify-end" : "justify-start"}`}
+                      >
+                        <div
+                          className={`max-w-[80%] rounded-3xl px-4 py-3 ${
+                            isMine
+                              ? "bg-orange-500 text-white"
+                              : "bg-white border border-gray-100 text-gray-900"
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 mb-1">
+                            <p className="text-xs font-black">
+                              {msg.senderName || "User"}
+                            </p>
+                            <p
+                              className={`text-[10px] font-black ${
+                                isMine ? "text-orange-100" : "text-gray-400"
+                              }`}
+                            >
+                              {msg.senderRole}
+                            </p>
+                          </div>
+
+                          <p className="text-sm font-semibold whitespace-pre-wrap">
+                            {msg.message}
+                          </p>
+
+                          {msg.createdAt && (
+                            <p
+                              className={`text-[10px] mt-2 ${
+                                isMine ? "text-orange-100" : "text-gray-400"
+                              }`}
+                            >
+                              {new Date(msg.createdAt).toLocaleTimeString()}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+                <div ref={chatEndRef} />
+              </div>
+
+              <div className="mt-4 flex gap-3">
+                <input
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") sendChatMessage();
+                  }}
+                  placeholder="Type message..."
+                  className="flex-1 rounded-2xl border border-gray-200 px-4 py-3 outline-none focus:border-orange-500"
+                />
+
+                <button
+                  onClick={sendChatMessage}
+                  disabled={chatLoading || !chatInput.trim()}
+                  className="px-5 py-3 rounded-2xl bg-orange-500 text-white font-black disabled:bg-gray-300"
+                >
+                  <Send size={20} />
+                </button>
+              </div>
             </div>
           </div>
 
@@ -719,9 +881,7 @@ export const OrderTracking: React.FC = () => {
                   )}
                 </div>
               ) : (
-                <p className="text-gray-500 font-bold">
-                  Rider has not been assigned yet.
-                </p>
+                <p className="text-gray-500 font-bold">Rider has not been assigned yet.</p>
               )}
             </div>
 
