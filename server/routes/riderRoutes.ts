@@ -290,7 +290,7 @@ router.get("/available-orders", protect, async (req: any, res: any) => {
     }
 
     const orders = await OrderModel.find({
-      rider: { $in: [null, undefined] },
+      $or: [{ rider: null }, { rider: { $exists: false } }],
       status: "READY_FOR_PICKUP",
       paymentStatus: { $in: ["PENDING", "PAID", "INITIATED"] },
     })
@@ -321,7 +321,7 @@ router.get("/orders/available", protect, async (req: any, res: any) => {
     }
 
     const orders = await OrderModel.find({
-      rider: { $in: [null, undefined] },
+      $or: [{ rider: null }, { rider: { $exists: false } }],
       status: "READY_FOR_PICKUP",
       paymentStatus: { $in: ["PENDING", "PAID", "INITIATED"] },
     })
@@ -393,6 +393,7 @@ router.post("/orders/:orderId/accept", protect, async (req: any, res: any) => {
     if (io) {
       io.to(`order_${order._id}`).emit("order:assigned", populatedOrder);
       io.to(`order_${order._id}`).emit("order:updated", populatedOrder);
+
       io.to(`chat_${order._id}`).emit("chat:participant_added", {
         orderId: order._id,
         riderId: rider._id,
@@ -418,15 +419,6 @@ router.post("/orders/:orderId/accept", protect, async (req: any, res: any) => {
   } catch (error: any) {
     res.status(500).json({ message: error.message });
   }
-});
-
-router.post("/accept/:orderId", protect, async (req: any, res: any) => {
-  req.params.orderId = req.params.orderId;
-  return router.handle(
-    { ...req, method: "POST", url: `/orders/${req.params.orderId}/accept` },
-    res,
-    () => {}
-  );
 });
 
 router.get("/orders", protect, async (req: any, res: any) => {
@@ -478,7 +470,10 @@ router.patch("/orders/:orderId/status", protect, async (req: any, res: any) => {
     order.status = status;
     order.trackingEvents = order.trackingEvents || [];
     order.trackingEvents.push(
-      addTrackingEvent(status, `Rider updated order to ${status.replaceAll("_", " ")}.`)
+      addTrackingEvent(
+        status,
+        `Rider updated order to ${status.replaceAll("_", " ")}.`
+      )
     );
 
     if (status === "DELIVERED") {

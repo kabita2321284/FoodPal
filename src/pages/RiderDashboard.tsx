@@ -146,9 +146,7 @@ export const RiderDashboard: React.FC = () => {
     );
   }, [availableOrders, rejectedOrderIds, isOnline]);
 
-  const estimatedEarnings = useMemo(() => {
-    return activeTasks.length * 50;
-  }, [activeTasks]);
+  const estimatedEarnings = useMemo(() => activeTasks.length * 50, [activeTasks]);
 
   const shouldSendLocation = (
     previous: LastSentLocation | null,
@@ -195,7 +193,7 @@ export const RiderDashboard: React.FC = () => {
 
   const fetchActiveTasks = async () => {
     try {
-      const data = await apiRequest("/api/orders/rider/myorders", {
+      const data = await apiRequest("/api/riders/orders", {
         token: user?.token,
       });
 
@@ -212,7 +210,7 @@ export const RiderDashboard: React.FC = () => {
 
   const fetchAvailableOrders = async () => {
     try {
-      const data = await apiRequest("/api/orders/rider/available", {
+      const data = await apiRequest("/api/riders/available-orders", {
         token: user?.token,
       });
 
@@ -224,11 +222,8 @@ export const RiderDashboard: React.FC = () => {
   };
 
   const refreshAll = async (silent = false) => {
-    if (silent) {
-      setRefreshing(true);
-    } else {
-      setLoading(true);
-    }
+    if (silent) setRefreshing(true);
+    else setLoading(true);
 
     await Promise.allSettled([
       fetchRiderInfo(),
@@ -344,21 +339,14 @@ export const RiderDashboard: React.FC = () => {
 
     if (
       !options?.force &&
-      !shouldSendLocation(
-        lastSentLocationRef.current,
-        orderId,
-        lat,
-        lng,
-        8,
-        8
-      )
+      !shouldSendLocation(lastSentLocationRef.current, orderId, lat, lng, 8, 8)
     ) {
       return;
     }
 
     const updatedAt = new Date().toISOString();
 
-    await apiRequest(`/api/orders/${orderId}/rider-location`, {
+    await apiRequest("/api/riders/location", {
       method: "PATCH",
       token: user?.token,
       timeout: 8000,
@@ -509,40 +497,27 @@ export const RiderDashboard: React.FC = () => {
   };
 
   const toggleOnlineStatus = async () => {
-    if (isOnline) {
-      await goOffline();
-    } else {
-      goOnlineWithGPS();
-    }
+    if (isOnline) await goOffline();
+    else goOnlineWithGPS();
   };
 
   const acceptOrder = async (orderId: string) => {
     try {
-      await apiRequest(`/api/orders/${orderId}/rider-accept`, {
-        method: "PATCH",
+      await apiRequest(`/api/riders/orders/${orderId}/accept`, {
+        method: "POST",
         token: user?.token,
       });
 
       saveRejectedOrders(rejectedOrderIds.filter((id) => id !== orderId));
       await refreshAll(true);
-
       startRealLiveTracking(orderId);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert("Could not accept this order.");
+      alert(err?.message || "Could not accept this order.");
     }
   };
 
   const rejectOrder = async (orderId: string) => {
-    try {
-      await apiRequest(`/api/orders/${orderId}/rider-reject`, {
-        method: "PATCH",
-        token: user?.token,
-      });
-    } catch (err) {
-      console.error(err);
-    }
-
     const next = Array.from(new Set([...rejectedOrderIds, orderId]));
     saveRejectedOrders(next);
     await refreshAll(true);
@@ -550,15 +525,10 @@ export const RiderDashboard: React.FC = () => {
 
   const updateOrderStatus = async (orderId: string, status: OrderStatus) => {
     try {
-      await apiRequest(`/api/orders/${orderId}/status`, {
+      await apiRequest(`/api/riders/orders/${orderId}/status`, {
         method: "PATCH",
         token: user?.token,
-        body: JSON.stringify({
-          status,
-          message: `Rider updated order to ${formatStatus(
-            status
-          ).toLowerCase()}`,
-        }),
+        body: JSON.stringify({ status }),
       });
 
       if (LIVE_TRACKING_STATUSES.includes(status)) {
@@ -571,9 +541,9 @@ export const RiderDashboard: React.FC = () => {
       }
 
       await refreshAll(true);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert("Could not update order status.");
+      alert(err?.message || "Could not update order status.");
     }
   };
 
@@ -600,24 +570,15 @@ export const RiderDashboard: React.FC = () => {
     order: any
   ): { label: string; status: OrderStatus } | null => {
     if (order.status === "READY_FOR_PICKUP") {
-      return {
-        label: "Pick Up Order",
-        status: "PICKED_UP",
-      };
+      return { label: "Pick Up Order", status: "PICKED_UP" };
     }
 
     if (order.status === "PICKED_UP") {
-      return {
-        label: "Start Delivery",
-        status: "ON_THE_WAY",
-      };
+      return { label: "Start Delivery", status: "ON_THE_WAY" };
     }
 
     if (order.status === "ON_THE_WAY") {
-      return {
-        label: "Mark Delivered",
-        status: "DELIVERED",
-      };
+      return { label: "Mark Delivered", status: "DELIVERED" };
     }
 
     return null;
@@ -640,26 +601,26 @@ export const RiderDashboard: React.FC = () => {
     socket.on("order:new_available", refreshHandler);
     socket.on("notification", refreshHandler);
 
+    const interval = window.setInterval(() => {
+      refreshAll(true);
+    }, 10000);
+
     return () => {
       socket.off("order:assigned", refreshHandler);
       socket.off("order:updated", refreshHandler);
       socket.off("order:new_available", refreshHandler);
       socket.off("notification", refreshHandler);
+      window.clearInterval(interval);
       stopAvailabilityTracking();
       stopRealLiveTracking();
     };
   }, [user, riderId]);
 
   useEffect(() => {
-    if (isOnline) {
-      startAvailabilityTracking();
-    } else {
-      stopAvailabilityTracking();
-    }
+    if (isOnline) startAvailabilityTracking();
+    else stopAvailabilityTracking();
 
-    return () => {
-      stopAvailabilityTracking();
-    };
+    return () => stopAvailabilityTracking();
   }, [isOnline]);
 
   useEffect(() => {
@@ -671,9 +632,7 @@ export const RiderDashboard: React.FC = () => {
         LIVE_TRACKING_STATUSES.includes(order.status)
     );
 
-    if (!stillActive && activeTasks.length > 0) {
-      stopRealLiveTracking();
-    }
+    if (!stillActive && activeTasks.length > 0) stopRealLiveTracking();
   }, [activeTasks, liveTrackingOrderId]);
 
   if (loading) {
@@ -691,8 +650,12 @@ export const RiderDashboard: React.FC = () => {
           <div>
             <h1 className="text-4xl font-black tracking-tight">Rider Portal</h1>
             <p className="text-gray-400 font-bold mt-2">
-              Hello, {user?.name || riderInfo?.userId?.name || riderInfo?.name || "Rider"} • FoodPal
-              Delivery
+              Hello,{" "}
+              {user?.name ||
+                riderInfo?.userId?.name ||
+                riderInfo?.name ||
+                "Rider"}{" "}
+              • FoodPal Delivery
             </p>
           </div>
 
@@ -1082,3 +1045,5 @@ export const RiderDashboard: React.FC = () => {
     </div>
   );
 };
+
+export default RiderDashboard;
