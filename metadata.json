@@ -1,0 +1,13 @@
+{
+  "name": "FoodPal",
+  "description": "Nepal's premium food ordering and delivery platform featuring real-time tracking, multilingual support, and multiple payment integrations.",
+  "requestFramePermissions": [
+    "geolocation",
+    "camera"
+  ],
+  "majorCapabilities": [
+    "Real-time Tracking",
+    "Multilingual Support",
+    "Role-based Dashboards"
+  ]
+}

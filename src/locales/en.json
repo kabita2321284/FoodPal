@@ -1,0 +1,40 @@
+{
+  "common": {
+    "app_name": "FoodPal",
+    "order_now": "Order Now",
+    "add_to_cart": "Add to Cart",
+    "restaurant": "Restaurant",
+    "delivery_address": "Delivery Address",
+    "search_placeholder": "Search restaurants or dishes...",
+    "cash_on_delivery": "Cash on Delivery",
+    "checkout": "Checkout",
+    "profile": "Profile",
+    "orders": "Orders",
+    "login": "Login",
+    "signup": "Sign Up",
+    "language": "Language",
+    "explore": "Explore",
+    "be_a_rider": "Be a Rider",
+    "add_restaurant": "Add Restaurant",
+    "logout": "Logout",
+    "edit_profile": "Edit Profile",
+    "save": "Save Changes",
+    "cancel": "Cancel",
+    "my_addresses": "My Addresses",
+    "add_address": "Add New Address",
+    "phone_number": "Phone Number",
+    "full_name": "Full Name"
+  },
+  "roles": {
+    "customer": "Customer",
+    "restaurant": "Restaurant Partner",
+    "rider": "Delivery Rider",
+    "admin": "Administrator"
+  },
+  "home": {
+    "hero_title": "Hungry? We've got you covered.",
+    "hero_subtitle": "Fresh food from your favorite restaurants delivered to your doorstep in Nepal.",
+    "popular_categories": "Popular Categories",
+    "featured_restaurants": "Featured Restaurants"
+  }
+}
