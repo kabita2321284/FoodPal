@@ -33,7 +33,7 @@ import { RiderOnboarding } from "./pages/RiderOnboarding";
 import { AdminDashboard } from "./pages/AdminDashboard";
 import { OrderTracking } from "./pages/OrderTracking";
 import { CartPage } from "./pages/CartPage";
-import { CheckoutPage } from "./pages/CheckoutPage";
+import CheckoutPage from "./pages/CheckoutPage";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 
 import { getSocket } from "./lib/socket";
@@ -119,7 +119,6 @@ const PaymentStatusPage: React.FC<{ type: "success" | "failed" }> = ({
   );
 };
 
-// Shared Layout Wrapper
 const AppLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user } = useAuth();
   const [notifications, setNotifications] = React.useState<any[]>([]);
