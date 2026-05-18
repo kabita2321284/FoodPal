@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "motion/react";
 import {
@@ -17,6 +17,10 @@ import {
   ToggleRight,
   TrendingUp,
   Zap,
+  MessageCircle,
+  Send,
+  Phone,
+  X,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { apiRequest } from "../lib/api";
@@ -33,6 +37,18 @@ type OrderStatus =
   | "CANCELLED"
   | "REJECTED"
   | "REFUNDED";
+
+type ChatMessage = {
+  _id?: string;
+  order?: string;
+  orderId?: string;
+  sender?: any;
+  senderName: string;
+  senderRole: string;
+  message: string;
+  messageType?: string;
+  createdAt?: string;
+};
 
 const ACTIVE_STATUSES: OrderStatus[] = [
   "PENDING",
@@ -52,11 +68,8 @@ const getNextRestaurantAction = (
   status: OrderStatus
 ): { label: string; status: OrderStatus } | null => {
   if (status === "PENDING") return { label: "Accept Order", status: "ACCEPTED" };
-  if (status === "ACCEPTED")
-    return { label: "Start Preparing", status: "PREPARING" };
-  if (status === "PREPARING")
-    return { label: "Ready For Pickup", status: "READY_FOR_PICKUP" };
-
+  if (status === "ACCEPTED") return { label: "Start Preparing", status: "PREPARING" };
+  if (status === "PREPARING") return { label: "Ready For Pickup", status: "READY_FOR_PICKUP" };
   return null;
 };
 
@@ -68,9 +81,7 @@ const getStatusColor = (status: string) => {
   if (status === "PICKED_UP") return "bg-indigo-100 text-indigo-700";
   if (status === "ON_THE_WAY") return "bg-green-100 text-green-700";
   if (status === "DELIVERED") return "bg-emerald-100 text-emerald-700";
-  if (status === "CANCELLED" || status === "REJECTED")
-    return "bg-red-100 text-red-700";
-
+  if (status === "CANCELLED" || status === "REJECTED") return "bg-red-100 text-red-700";
   return "bg-gray-100 text-gray-700";
 };
 
@@ -84,10 +95,13 @@ export const RestaurantDashboard: React.FC = () => {
   const [categories, setCategories] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [activeTab, setActiveTab] = useState<"orders" | "menu" | "eta">("orders");
 
-  const [activeTab, setActiveTab] = useState<"orders" | "menu" | "eta">(
-    "orders"
-  );
+  const [selectedChatOrder, setSelectedChatOrder] = useState<any>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   const [etaForm, setEtaForm] = useState({
     preparationTime: 20,
@@ -111,7 +125,6 @@ export const RestaurantDashboard: React.FC = () => {
 
   const todayRevenue = useMemo(() => {
     const today = new Date().toDateString();
-
     return orders
       .filter(
         (order) =>
@@ -178,16 +191,91 @@ export const RestaurantDashboard: React.FC = () => {
 
   const fetchAll = async (silent = false) => {
     silent ? setRefreshing(true) : setLoading(true);
-
     await Promise.allSettled([
       fetchRestaurantInfo(),
       fetchOrders(),
       fetchCategories(),
       fetchMenuItems(),
     ]);
-
     setRefreshing(false);
     setLoading(false);
+  };
+
+  const fetchChatMessages = async (orderId: string) => {
+    try {
+      const data = await apiRequest(`/api/chats/order/${orderId}`, {
+        token: user?.token,
+      });
+      setChatMessages(data.messages || []);
+    } catch (err: any) {
+      console.error(err);
+      alert(err.message || "Could not load chat.");
+    }
+  };
+
+  const openOrderChat = async (order: any) => {
+    setSelectedChatOrder(order);
+    setChatMessages([]);
+    const socket = getSocket();
+    socket.emit("chat:join", order._id);
+    await fetchChatMessages(order._id);
+  };
+
+  const closeOrderChat = () => {
+    if (selectedChatOrder?._id) {
+      getSocket().emit("chat:leave", selectedChatOrder._id);
+    }
+    setSelectedChatOrder(null);
+    setChatMessages([]);
+    setChatInput("");
+  };
+
+  const sendChatMessage = async () => {
+    if (!selectedChatOrder?._id || !chatInput.trim()) return;
+
+    const text = chatInput.trim();
+    setChatInput("");
+
+    try {
+      setChatLoading(true);
+      await apiRequest(`/api/chats/order/${selectedChatOrder._id}`, {
+        method: "POST",
+        token: user?.token,
+        body: JSON.stringify({
+          message: text,
+          messageType: "TEXT",
+        }),
+      });
+    } catch (err: any) {
+      console.error(err);
+      alert(err.message || "Could not send message.");
+      setChatInput(text);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
+  const requestCall = async () => {
+    if (!selectedChatOrder?._id) return;
+
+    const phone =
+      selectedChatOrder.customer?.phone || selectedChatOrder.deliveryAddress?.phone;
+
+    if (phone) {
+      window.location.href = `tel:${phone}`;
+      return;
+    }
+
+    try {
+      await apiRequest(`/api/chats/order/${selectedChatOrder._id}/call-request`, {
+        method: "POST",
+        token: user?.token,
+        body: JSON.stringify({ callType: "phone" }),
+      });
+      alert("Call request sent, but customer phone number is missing.");
+    } catch (err: any) {
+      alert(err.message || "Could not request call.");
+    }
   };
 
   useEffect(() => {
@@ -202,16 +290,32 @@ export const RestaurantDashboard: React.FC = () => {
 
     const refreshOrders = () => fetchOrders();
 
+    const handleNewChatMessage = (message: ChatMessage) => {
+      const orderId = String(message?.order || message?.orderId || "");
+      if (!selectedChatOrder?._id || orderId !== String(selectedChatOrder._id)) return;
+
+      setChatMessages((prev) => {
+        if (message._id && prev.some((m) => m._id === message._id)) return prev;
+        return [...prev, message];
+      });
+    };
+
     socket.on("order:new", refreshOrders);
     socket.on("order:updated", refreshOrders);
     socket.on("order:status_update", refreshOrders);
+    socket.on("chat:new_message", handleNewChatMessage);
 
     return () => {
       socket.off("order:new", refreshOrders);
       socket.off("order:updated", refreshOrders);
       socket.off("order:status_update", refreshOrders);
+      socket.off("chat:new_message", handleNewChatMessage);
     };
-  }, [restaurant?._id]);
+  }, [restaurant?._id, selectedChatOrder?._id]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
 
   const updateOrderStatus = async (orderId: string, status: OrderStatus) => {
     try {
@@ -280,9 +384,7 @@ export const RestaurantDashboard: React.FC = () => {
       alert("ETA settings saved.");
     } catch (err) {
       console.error(err);
-      alert(
-        "Backend route missing: /api/restaurants/me/eta-settings. Send me restaurantRoutes.ts next and I will add it."
-      );
+      alert("Backend route missing: /api/restaurants/me/eta-settings.");
     }
   };
 
@@ -300,9 +402,7 @@ export const RestaurantDashboard: React.FC = () => {
       setRestaurant(updated);
     } catch (err) {
       console.error(err);
-      alert(
-        "Backend route missing: /api/restaurants/me/eta-settings. Send me restaurantRoutes.ts next and I will add it."
-      );
+      alert("Backend route missing: /api/restaurants/me/eta-settings.");
     }
   };
 
@@ -406,31 +506,11 @@ export const RestaurantDashboard: React.FC = () => {
         )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-5 mb-10">
-          <StatCard
-            icon={<Package />}
-            label="Active Orders"
-            value={activeOrders.length}
-          />
-          <StatCard
-            icon={<CheckCircle />}
-            label="Completed"
-            value={completedOrders.length}
-          />
-          <StatCard
-            icon={<DollarSign />}
-            label="Today Revenue"
-            value={`Rs. ${todayRevenue}`}
-          />
-          <StatCard
-            icon={<Clock />}
-            label="Prep Time"
-            value={`${etaForm.averagePrepTime} min`}
-          />
-          <StatCard
-            icon={<TrendingUp />}
-            label="Menu Items"
-            value={menuItems.length}
-          />
+          <StatCard icon={<Package />} label="Active Orders" value={activeOrders.length} />
+          <StatCard icon={<CheckCircle />} label="Completed" value={completedOrders.length} />
+          <StatCard icon={<DollarSign />} label="Today Revenue" value={`Rs. ${todayRevenue}`} />
+          <StatCard icon={<Clock />} label="Prep Time" value={`${etaForm.averagePrepTime} min`} />
+          <StatCard icon={<TrendingUp />} label="Menu Items" value={menuItems.length} />
         </div>
 
         <div className="flex gap-3 mb-8 overflow-x-auto">
@@ -486,6 +566,9 @@ export const RestaurantDashboard: React.FC = () => {
                           Customer: {order.customer?.name || "Customer"}
                         </p>
                         <p className="text-gray-500 font-bold">
+                          Phone: {order.customer?.phone || order.deliveryAddress?.phone || "No phone"}
+                        </p>
+                        <p className="text-gray-500 font-bold">
                           Address: {order.deliveryAddress?.text || "No address"}
                         </p>
                         <p className="text-sm text-gray-400 font-bold mt-1">
@@ -502,27 +585,41 @@ export const RestaurantDashboard: React.FC = () => {
                       </div>
 
                       <div className="xl:text-right">
-                        <p className="text-3xl font-black">
-                          Rs. {order.totalAmount || 0}
-                        </p>
+                        <p className="text-3xl font-black">Rs. {order.totalAmount || 0}</p>
                         <p className="text-sm text-gray-500 font-bold mt-1">
                           ETA: {order.estimatedTime || restaurant.estimatedDeliveryTime || 30} min
                         </p>
 
                         <div className="flex flex-wrap xl:justify-end gap-3 mt-5">
                           <button
-                            onClick={() => navigate(`/orders/${order._id}`)}
+                            onClick={() => navigate(`/order/${order._id}/track`)}
                             className="px-5 py-3 rounded-2xl bg-gray-100 text-gray-700 font-black text-xs uppercase flex items-center gap-2"
                           >
                             <Eye size={16} />
                             View
                           </button>
 
+                          <button
+                            onClick={() => openOrderChat(order)}
+                            className="px-5 py-3 rounded-2xl bg-blue-100 text-blue-700 font-black text-xs uppercase flex items-center gap-2"
+                          >
+                            <MessageCircle size={16} />
+                            Chat
+                          </button>
+
+                          {(order.customer?.phone || order.deliveryAddress?.phone) && (
+                            <a
+                              href={`tel:${order.customer?.phone || order.deliveryAddress?.phone}`}
+                              className="px-5 py-3 rounded-2xl bg-green-100 text-green-700 font-black text-xs uppercase flex items-center gap-2"
+                            >
+                              <Phone size={16} />
+                              Call
+                            </a>
+                          )}
+
                           {nextAction && (
                             <button
-                              onClick={() =>
-                                updateOrderStatus(order._id, nextAction.status)
-                              }
+                              onClick={() => updateOrderStatus(order._id, nextAction.status)}
                               className="px-5 py-3 rounded-2xl bg-orange-500 text-white font-black text-xs uppercase"
                             >
                               {nextAction.label}
@@ -556,10 +653,7 @@ export const RestaurantDashboard: React.FC = () => {
               ) : (
                 <div className="space-y-3">
                   {categories.map((cat) => (
-                    <div
-                      key={cat._id}
-                      className="p-4 rounded-2xl bg-gray-50 font-black"
-                    >
+                    <div key={cat._id} className="p-4 rounded-2xl bg-gray-50 font-black">
                       {cat.name}
                     </div>
                   ))}
@@ -574,10 +668,7 @@ export const RestaurantDashboard: React.FC = () => {
               ) : (
                 <div className="space-y-3">
                   {menuItems.map((item) => (
-                    <div
-                      key={item._id}
-                      className="p-4 rounded-2xl bg-gray-50 flex justify-between gap-4"
-                    >
+                    <div key={item._id} className="p-4 rounded-2xl bg-gray-50 flex justify-between gap-4">
                       <div>
                         <p className="font-black">{item.name}</p>
                         <p className="text-sm text-gray-500 font-bold">
@@ -665,6 +756,114 @@ export const RestaurantDashboard: React.FC = () => {
           </div>
         )}
       </div>
+
+      {selectedChatOrder && (
+        <div className="fixed inset-0 z-[200] bg-black/40 flex items-end md:items-center justify-center p-4">
+          <div className="bg-white w-full max-w-2xl rounded-[32px] overflow-hidden shadow-2xl">
+            <div className="p-5 border-b flex items-center justify-between">
+              <div>
+                <p className="text-xs font-black text-orange-500 uppercase">
+                  Order #{selectedChatOrder._id?.slice(-6).toUpperCase()}
+                </p>
+                <h2 className="text-xl font-black">Customer chat</h2>
+                <p className="text-sm text-gray-500 font-bold">
+                  {selectedChatOrder.customer?.name || "Customer"}
+                </p>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={requestCall}
+                  className="p-3 rounded-2xl bg-green-100 text-green-700"
+                >
+                  <Phone size={20} />
+                </button>
+                <button
+                  onClick={closeOrderChat}
+                  className="p-3 rounded-2xl bg-gray-100 text-gray-700"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+            </div>
+
+            <div className="h-[420px] overflow-y-auto bg-gray-50 p-5 space-y-3">
+              {chatMessages.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-gray-400 font-black text-center">
+                  No messages yet.
+                </div>
+              ) : (
+                chatMessages.map((msg, index) => {
+                  const senderId =
+                    typeof msg.sender === "object" ? msg.sender?._id : msg.sender;
+                  const myId = user?._id || user?.id;
+                  const isMine = String(senderId) === String(myId);
+
+                  return (
+                    <div
+                      key={msg._id || index}
+                      className={`flex ${isMine ? "justify-end" : "justify-start"}`}
+                    >
+                      <div
+                        className={`max-w-[80%] rounded-3xl px-4 py-3 ${
+                          isMine
+                            ? "bg-orange-500 text-white"
+                            : "bg-white border border-gray-100 text-gray-900"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <p className="text-xs font-black">
+                            {msg.senderName || "User"}
+                          </p>
+                          <p
+                            className={`text-[10px] font-black ${
+                              isMine ? "text-orange-100" : "text-gray-400"
+                            }`}
+                          >
+                            {msg.senderRole}
+                          </p>
+                        </div>
+                        <p className="text-sm font-semibold whitespace-pre-wrap">
+                          {msg.message}
+                        </p>
+                        {msg.createdAt && (
+                          <p
+                            className={`text-[10px] mt-2 ${
+                              isMine ? "text-orange-100" : "text-gray-400"
+                            }`}
+                          >
+                            {new Date(msg.createdAt).toLocaleTimeString()}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            <div className="p-5 border-t flex gap-3">
+              <input
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") sendChatMessage();
+                }}
+                placeholder="Reply to customer..."
+                className="flex-1 rounded-2xl border border-gray-200 px-4 py-3 outline-none focus:border-orange-500"
+              />
+              <button
+                onClick={sendChatMessage}
+                disabled={chatLoading || !chatInput.trim()}
+                className="px-5 py-3 rounded-2xl bg-orange-500 text-white font-black disabled:bg-gray-300"
+              >
+                <Send size={20} />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
