@@ -16,6 +16,8 @@ import {
   Wifi,
   WifiOff,
   AlertCircle,
+  MessageCircle,
+  Phone,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { apiRequest } from "../lib/api";
@@ -45,6 +47,18 @@ type LastSentLocation = {
   lat: number;
   lng: number;
   sentAt: number;
+};
+
+type ChatMessage = {
+  _id?: string;
+  order?: string;
+  orderId?: string;
+  sender?: any;
+  senderName: string;
+  senderRole: string;
+  message: string;
+  messageType?: string;
+  createdAt?: string;
 };
 
 const ACTIVE_DELIVERY_STATUSES: OrderStatus[] = [
@@ -130,6 +144,12 @@ export const RiderDashboard: React.FC = () => {
   const [rejectedOrderIds, setRejectedOrderIds] = useState<string[]>(() =>
     safeJsonArray("foodpal_rejected_orders")
   );
+
+  const [selectedChatOrder, setSelectedChatOrder] = useState<any>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   const deliveryWatchIdRef = useRef<number | null>(null);
   const availabilityWatchIdRef = useRef<number | null>(null);
@@ -233,6 +253,89 @@ export const RiderDashboard: React.FC = () => {
 
     setRefreshing(false);
     setLoading(false);
+  };
+
+  const fetchChatMessages = async (orderId: string) => {
+    try {
+      const data = await apiRequest(`/api/chats/order/${orderId}`, {
+        token: user?.token,
+      });
+
+      setChatMessages(data.messages || []);
+    } catch (err: any) {
+      console.error(err);
+      alert(err.message || "Could not load chat.");
+    }
+  };
+
+  const openOrderChat = async (order: any) => {
+    setSelectedChatOrder(order);
+    setChatMessages([]);
+
+    const socket = getSocket();
+    socket.emit("chat:join", order._id);
+
+    await fetchChatMessages(order._id);
+  };
+
+  const closeOrderChat = () => {
+    if (selectedChatOrder?._id) {
+      getSocket().emit("chat:leave", selectedChatOrder._id);
+    }
+
+    setSelectedChatOrder(null);
+    setChatMessages([]);
+    setChatInput("");
+  };
+
+  const sendChatMessage = async () => {
+    if (!selectedChatOrder?._id || !chatInput.trim()) return;
+
+    const text = chatInput.trim();
+    setChatInput("");
+
+    try {
+      setChatLoading(true);
+
+      await apiRequest(`/api/chats/order/${selectedChatOrder._id}`, {
+        method: "POST",
+        token: user?.token,
+        body: JSON.stringify({
+          message: text,
+          messageType: "TEXT",
+        }),
+      });
+    } catch (err: any) {
+      console.error(err);
+      alert(err.message || "Could not send message.");
+      setChatInput(text);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
+  const requestCall = async () => {
+    if (!selectedChatOrder?._id) return;
+
+    const phone =
+      selectedChatOrder.customer?.phone || selectedChatOrder.deliveryAddress?.phone;
+
+    if (phone) {
+      window.location.href = `tel:${phone}`;
+      return;
+    }
+
+    try {
+      await apiRequest(`/api/chats/order/${selectedChatOrder._id}/call-request`, {
+        method: "POST",
+        token: user?.token,
+        body: JSON.stringify({ callType: "phone" }),
+      });
+
+      alert("Call request sent, but customer phone number is missing.");
+    } catch (err: any) {
+      alert(err.message || "Could not request call.");
+    }
   };
 
   const sendRiderCurrentLocation = async (
@@ -503,7 +606,7 @@ export const RiderDashboard: React.FC = () => {
 
   const acceptOrder = async (orderId: string) => {
     try {
-      await apiRequest(`/api/riders/orders/${orderId}/accept`, {
+      const acceptedOrder = await apiRequest(`/api/riders/orders/${orderId}/accept`, {
         method: "POST",
         token: user?.token,
       });
@@ -511,6 +614,10 @@ export const RiderDashboard: React.FC = () => {
       saveRejectedOrders(rejectedOrderIds.filter((id) => id !== orderId));
       await refreshAll(true);
       startRealLiveTracking(orderId);
+
+      if (acceptedOrder?._id) {
+        getSocket().emit("chat:join", acceptedOrder._id);
+      }
     } catch (err: any) {
       console.error(err);
       alert(err?.message || "Could not accept this order.");
@@ -596,10 +703,23 @@ export const RiderDashboard: React.FC = () => {
 
     const refreshHandler = () => refreshAll(true);
 
+    const handleNewChatMessage = (message: ChatMessage) => {
+      const orderId = String(message?.order || message?.orderId || "");
+      if (!selectedChatOrder?._id || orderId !== String(selectedChatOrder._id)) {
+        return;
+      }
+
+      setChatMessages((prev) => {
+        if (message._id && prev.some((m) => m._id === message._id)) return prev;
+        return [...prev, message];
+      });
+    };
+
     socket.on("order:assigned", refreshHandler);
     socket.on("order:updated", refreshHandler);
     socket.on("order:new_available", refreshHandler);
     socket.on("notification", refreshHandler);
+    socket.on("chat:new_message", handleNewChatMessage);
 
     const interval = window.setInterval(() => {
       refreshAll(true);
@@ -610,11 +730,12 @@ export const RiderDashboard: React.FC = () => {
       socket.off("order:updated", refreshHandler);
       socket.off("order:new_available", refreshHandler);
       socket.off("notification", refreshHandler);
+      socket.off("chat:new_message", handleNewChatMessage);
       window.clearInterval(interval);
       stopAvailabilityTracking();
       stopRealLiveTracking();
     };
-  }, [user, riderId]);
+  }, [user, riderId, selectedChatOrder?._id]);
 
   useEffect(() => {
     if (isOnline) startAvailabilityTracking();
@@ -634,6 +755,10 @@ export const RiderDashboard: React.FC = () => {
 
     if (!stillActive && activeTasks.length > 0) stopRealLiveTracking();
   }, [activeTasks, liveTrackingOrderId]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
 
   if (loading) {
     return (
@@ -897,6 +1022,8 @@ export const RiderDashboard: React.FC = () => {
               {activeTasks.map((order) => {
                 const nextAction = getNextAction(order);
                 const isTrackingThisOrder = liveTrackingOrderId === order._id;
+                const phone =
+                  order.customer?.phone || order.deliveryAddress?.phone || "";
 
                 return (
                   <div
@@ -1010,6 +1137,24 @@ export const RiderDashboard: React.FC = () => {
                       )}
 
                       <button
+                        onClick={() => openOrderChat(order)}
+                        className="px-5 py-4 bg-purple-600 rounded-2xl font-black text-sm uppercase flex items-center gap-2 hover:bg-purple-500 transition-colors"
+                      >
+                        <MessageCircle size={18} />
+                        Chat
+                      </button>
+
+                      {phone && (
+                        <a
+                          href={`tel:${phone}`}
+                          className="px-5 py-4 bg-green-600 rounded-2xl font-black text-sm uppercase flex items-center gap-2 hover:bg-green-500 transition-colors"
+                        >
+                          <Phone size={18} />
+                          Call
+                        </a>
+                      )}
+
+                      <button
                         onClick={() => sendLiveLocationOnce(order._id)}
                         disabled={sendingLocation}
                         className="px-5 py-4 bg-blue-600 rounded-2xl font-black text-sm uppercase flex items-center gap-2 disabled:opacity-50 hover:bg-blue-500 transition-colors"
@@ -1042,6 +1187,117 @@ export const RiderDashboard: React.FC = () => {
           )}
         </section>
       </div>
+
+      {selectedChatOrder && (
+        <div className="fixed inset-0 z-[200] bg-black/60 flex items-end md:items-center justify-center p-4">
+          <div className="bg-white text-gray-900 w-full max-w-2xl rounded-[32px] overflow-hidden shadow-2xl">
+            <div className="p-5 border-b flex items-center justify-between">
+              <div>
+                <p className="text-xs font-black text-orange-500 uppercase">
+                  Order #{selectedChatOrder._id?.slice(-6).toUpperCase()}
+                </p>
+                <h2 className="text-xl font-black">Delivery chat</h2>
+                <p className="text-sm text-gray-500 font-bold">
+                  Customer, restaurant, and rider
+                </p>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={requestCall}
+                  className="p-3 rounded-2xl bg-green-100 text-green-700"
+                >
+                  <Phone size={20} />
+                </button>
+                <button
+                  onClick={closeOrderChat}
+                  className="p-3 rounded-2xl bg-gray-100 text-gray-700"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+            </div>
+
+            <div className="h-[420px] overflow-y-auto bg-gray-50 p-5 space-y-3">
+              {chatMessages.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-gray-400 font-black text-center">
+                  No messages yet.
+                </div>
+              ) : (
+                chatMessages.map((msg, index) => {
+                  const senderId =
+                    typeof msg.sender === "object" ? msg.sender?._id : msg.sender;
+                  const myId = user?._id || user?.id;
+                  const isMine = String(senderId) === String(myId);
+
+                  return (
+                    <div
+                      key={msg._id || index}
+                      className={`flex ${isMine ? "justify-end" : "justify-start"}`}
+                    >
+                      <div
+                        className={`max-w-[80%] rounded-3xl px-4 py-3 ${
+                          isMine
+                            ? "bg-orange-500 text-white"
+                            : "bg-white border border-gray-100 text-gray-900"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <p className="text-xs font-black">
+                            {msg.senderName || "User"}
+                          </p>
+                          <p
+                            className={`text-[10px] font-black ${
+                              isMine ? "text-orange-100" : "text-gray-400"
+                            }`}
+                          >
+                            {msg.senderRole}
+                          </p>
+                        </div>
+
+                        <p className="text-sm font-semibold whitespace-pre-wrap">
+                          {msg.message}
+                        </p>
+
+                        {msg.createdAt && (
+                          <p
+                            className={`text-[10px] mt-2 ${
+                              isMine ? "text-orange-100" : "text-gray-400"
+                            }`}
+                          >
+                            {new Date(msg.createdAt).toLocaleTimeString()}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            <div className="p-5 border-t flex gap-3">
+              <input
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") sendChatMessage();
+                }}
+                placeholder="Send message..."
+                className="flex-1 rounded-2xl border border-gray-200 px-4 py-3 outline-none focus:border-orange-500"
+              />
+
+              <button
+                onClick={sendChatMessage}
+                disabled={chatLoading || !chatInput.trim()}
+                className="px-5 py-3 rounded-2xl bg-orange-500 text-white font-black disabled:bg-gray-300"
+              >
+                <Send size={20} />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
