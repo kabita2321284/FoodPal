@@ -1,5 +1,17 @@
 import mongoose from "mongoose";
 
+const SUPPORTED_CURRENCIES = [
+  "NPR",
+  "GBP",
+  "USD",
+  "EUR",
+  "INR",
+  "AUD",
+  "CAD",
+  "AED",
+  "JPY",
+];
+
 const orderItemSchema = new mongoose.Schema(
   {
     item: {
@@ -86,6 +98,62 @@ const trackingEventSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const currencyConversionSchema = new mongoose.Schema(
+  {
+    baseCurrency: {
+      type: String,
+      default: "NPR",
+      trim: true,
+      uppercase: true,
+      enum: SUPPORTED_CURRENCIES,
+    },
+
+    paymentCurrency: {
+      type: String,
+      default: "GBP",
+      trim: true,
+      uppercase: true,
+      enum: SUPPORTED_CURRENCIES,
+    },
+
+    exchangeRate: {
+      type: Number,
+      default: 1,
+      min: 0,
+    },
+
+    baseAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    convertedAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    convertedMinorAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    provider: {
+      type: String,
+      default: "fallback",
+      trim: true,
+    },
+
+    convertedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: false }
+);
+
 const paymentHistorySchema = new mongoose.Schema(
   {
     method: {
@@ -120,9 +188,56 @@ const paymentHistorySchema = new mongoose.Schema(
 
     currency: {
       type: String,
-      default: "GBP",
+      default: "NPR",
       trim: true,
       uppercase: true,
+      enum: SUPPORTED_CURRENCIES,
+    },
+
+    baseAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    baseCurrency: {
+      type: String,
+      default: "NPR",
+      trim: true,
+      uppercase: true,
+      enum: SUPPORTED_CURRENCIES,
+    },
+
+    paymentCurrency: {
+      type: String,
+      default: "NPR",
+      trim: true,
+      uppercase: true,
+      enum: SUPPORTED_CURRENCIES,
+    },
+
+    exchangeRate: {
+      type: Number,
+      default: 1,
+      min: 0,
+    },
+
+    convertedAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    convertedMinorAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    conversionProvider: {
+      type: String,
+      default: "",
+      trim: true,
     },
 
     rawResponse: {
@@ -172,7 +287,6 @@ const OrderSchema = new mongoose.Schema(
       type: String,
       enum: ["NOT_STARTED", "SEARCHING", "ASSIGNED", "NO_RIDER_FOUND", "FAILED"],
       default: "NOT_STARTED",
-      index: true,
     },
 
     autoAssignmentAttempts: {
@@ -242,11 +356,71 @@ const OrderSchema = new mongoose.Schema(
       min: 0,
     },
 
+    /**
+     * Main app/base currency.
+     * All FoodPal prices are stored/calculated in NPR.
+     */
     currency: {
       type: String,
-      default: "GBP",
+      default: "NPR",
       trim: true,
       uppercase: true,
+      enum: SUPPORTED_CURRENCIES,
+    },
+
+    /**
+     * Currency customer selected for online payment.
+     * Example: GBP, USD, EUR, INR, AUD, CAD, AED, JPY.
+     */
+    paymentCurrency: {
+      type: String,
+      default: "NPR",
+      trim: true,
+      uppercase: true,
+      enum: SUPPORTED_CURRENCIES,
+      index: true,
+    },
+
+    /**
+     * Converted amount displayed/charged by payment provider.
+     * Example: Rs. 1000 NPR converted to £5.80 GBP.
+     */
+    convertedPaymentAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    /**
+     * Provider minor unit amount.
+     * Stripe needs this:
+     * GBP/USD/EUR = cents/pence
+     * JPY = no decimal
+     */
+    convertedPaymentMinorAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    exchangeRate: {
+      type: Number,
+      default: 1,
+      min: 0,
+    },
+
+    currencyConversion: {
+      type: currencyConversionSchema,
+      default: () => ({
+        baseCurrency: "NPR",
+        paymentCurrency: "NPR",
+        exchangeRate: 1,
+        baseAmount: 0,
+        convertedAmount: 0,
+        convertedMinorAmount: 0,
+        provider: "none",
+        convertedAt: new Date(),
+      }),
     },
 
     promoCode: {
@@ -498,7 +672,7 @@ OrderSchema.index({ riderProfile: 1, createdAt: -1 });
 OrderSchema.index({ status: 1, createdAt: -1 });
 OrderSchema.index({ paymentStatus: 1, createdAt: -1 });
 OrderSchema.index({ paymentMethod: 1, createdAt: -1 });
-OrderSchema.index({ autoAssignmentStatus: 1 });
+OrderSchema.index({ paymentCurrency: 1, createdAt: -1 });
 OrderSchema.index({
   "deliveryAddress.lat": 1,
   "deliveryAddress.lng": 1,
