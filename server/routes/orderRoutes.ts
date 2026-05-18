@@ -16,6 +16,60 @@ const RestaurantModel = Restaurant as any;
 
 let stripeClient: Stripe | null = null;
 
+const APP_CURRENCY = "NPR";
+const STRIPE_CURRENCY = "gbp";
+
+/**
+ * Real currency conversion:
+ * App stores prices in Nepali Rupees.
+ * Stripe charges in GBP.
+ * It first tries live exchange rate.
+ * If live rate fails, it uses NPR_TO_GBP_RATE from Render/.env.
+ */
+const FALLBACK_NPR_TO_GBP_RATE = Number(process.env.NPR_TO_GBP_RATE || 0.0058);
+
+let cachedNprToGbpRate = FALLBACK_NPR_TO_GBP_RATE;
+let cachedRateTime = 0;
+
+const getNprToGbpRate = async () => {
+  const now = Date.now();
+  const cacheAgeMs = 6 * 60 * 60 * 1000;
+
+  if (cachedRateTime && now - cachedRateTime < cacheAgeMs) {
+    return cachedNprToGbpRate;
+  }
+
+  try {
+    const response = await fetch("https://open.er-api.com/v6/latest/NPR");
+    const data: any = await response.json();
+
+    const rate = Number(data?.rates?.GBP);
+
+    if (response.ok && Number.isFinite(rate) && rate > 0) {
+      cachedNprToGbpRate = rate;
+      cachedRateTime = now;
+      return rate;
+    }
+  } catch (error) {
+    console.warn("Live currency conversion failed. Using fallback rate.");
+  }
+
+  return FALLBACK_NPR_TO_GBP_RATE;
+};
+
+const convertNprToGbpMinorUnit = async (amountNpr: number) => {
+  const rate = await getNprToGbpRate();
+
+  const amountGbp = Number(amountNpr || 0) * rate;
+  const amountPence = Math.round(amountGbp * 100);
+
+  return {
+    rate,
+    amountGbp: Number(amountGbp.toFixed(2)),
+    amountPence: Math.max(50, amountPence),
+  };
+};
+
 const getStripeClient = () => {
   const stripeSecretKey = process.env.STRIPE_SECRET_KEY?.trim();
 
@@ -80,7 +134,7 @@ const normalizePaymentMethod = (paymentMethod: any) => {
   const method = String(paymentMethod || "CASH").toUpperCase();
 
   if (["CASH", "CARD", "STRIPE", "ESEWA", "KHALTI", "WALLET"].includes(method)) {
-    return method;
+    return method === "CARD" ? "STRIPE" : method;
   }
 
   return "CASH";
@@ -167,7 +221,7 @@ const markOrderPaid = async ({
     providerTransactionId: providerTransactionId || "",
     providerReference: providerReference || "",
     amount: order.totalAmount || 0,
-    currency: order.currency || "GBP",
+    currency: order.currency || APP_CURRENCY,
     rawResponse: rawResponse || null,
     createdAt: new Date(),
   });
@@ -175,7 +229,10 @@ const markOrderPaid = async ({
   order.trackingEvents = order.trackingEvents || [];
 
   order.trackingEvents.push(
-    addTrackingEvent("PAYMENT_SUCCESS", `${method} payment completed successfully.`)
+    addTrackingEvent(
+      "PAYMENT_SUCCESS",
+      `${method} payment completed successfully.`
+    )
   );
 
   await order.save();
@@ -268,6 +325,7 @@ router.post("/", protect, async (req: any, res: any) => {
       discountAmount: Number(discountAmount || 0),
       taxAmount: Number(taxAmount || 0),
       surgeFee: Number(surgeFee || 0),
+      currency: APP_CURRENCY,
       deliveryAddress,
       restaurantAddress,
       paymentMethod: finalPaymentMethod,
@@ -284,7 +342,7 @@ router.post("/", protect, async (req: any, res: any) => {
           method: finalPaymentMethod,
           status: finalPaymentMethod === "CASH" ? "PENDING" : "INITIATED",
           amount: Number(totalAmount || 0),
-          currency: "GBP",
+          currency: APP_CURRENCY,
           createdAt: new Date(),
         },
       ],
@@ -318,7 +376,7 @@ router.post("/:id/create-stripe-session", protect, async (req: any, res: any) =>
     if (!stripe) {
       return res.status(500).json({
         message:
-          "Stripe is not configured properly. Check STRIPE_SECRET_KEY in your .env file and restart the server.",
+          "Stripe is not configured properly. Check STRIPE_SECRET_KEY in Render environment variables.",
       });
     }
 
@@ -344,9 +402,9 @@ router.post("/:id/create-stripe-session", protect, async (req: any, res: any) =>
       });
     }
 
-    const clientUrl = process.env.CLIENT_URL || "http://localhost:5173";
+    const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
 
-    const currency = String(order.currency || "GBP").toLowerCase();
+    const conversion = await convertNprToGbpMinorUnit(Number(order.totalAmount || 0));
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
@@ -355,12 +413,16 @@ router.post("/:id/create-stripe-session", protect, async (req: any, res: any) =>
       line_items: [
         {
           price_data: {
-            currency,
+            currency: STRIPE_CURRENCY,
             product_data: {
-              name: `FoodPal Order #${String(order._id).slice(-6).toUpperCase()}`,
-              description: `${order.items?.length || 1} item(s) from FoodPal`,
+              name: `FoodPal Order #${String(order._id)
+                .slice(-6)
+                .toUpperCase()}`,
+              description: `Original amount: Rs. ${Number(
+                order.totalAmount || 0
+              ).toFixed(2)} NPR`,
             },
-            unit_amount: Math.max(1, Math.round(Number(order.totalAmount || 0) * 100)),
+            unit_amount: conversion.amountPence,
           },
           quantity: 1,
         },
@@ -373,6 +435,12 @@ router.post("/:id/create-stripe-session", protect, async (req: any, res: any) =>
         orderId: String(order._id),
         customerId: String(order.customer),
         restaurantId: String(order.restaurant),
+        appCurrency: APP_CURRENCY,
+        appAmountNpr: String(order.totalAmount || 0),
+        stripeCurrency: STRIPE_CURRENCY,
+        nprToGbpRate: String(conversion.rate),
+        stripeAmountGbp: String(conversion.amountGbp),
+        stripeAmountPence: String(conversion.amountPence),
       },
     });
 
@@ -389,10 +457,15 @@ router.post("/:id/create-stripe-session", protect, async (req: any, res: any) =>
       providerTransactionId: session.id,
       providerReference: session.id,
       amount: order.totalAmount || 0,
-      currency: order.currency || "GBP",
+      currency: APP_CURRENCY,
       rawResponse: {
         id: session.id,
         url: session.url,
+        appAmountNpr: Number(order.totalAmount || 0),
+        stripeCurrency: STRIPE_CURRENCY,
+        stripeAmountPence: conversion.amountPence,
+        stripeAmountGbp: conversion.amountGbp,
+        nprToGbpRate: conversion.rate,
         payment_status: session.payment_status,
       },
       createdAt: new Date(),
@@ -404,6 +477,13 @@ router.post("/:id/create-stripe-session", protect, async (req: any, res: any) =>
       success: true,
       url: session.url,
       sessionId: session.id,
+      conversion: {
+        appAmountNpr: Number(order.totalAmount || 0),
+        stripeCurrency: STRIPE_CURRENCY.toUpperCase(),
+        stripeAmountGbp: conversion.amountGbp,
+        stripeAmountPence: conversion.amountPence,
+        nprToGbpRate: conversion.rate,
+      },
     });
   } catch (error: any) {
     console.error("Stripe session error:", error);
@@ -422,7 +502,7 @@ router.post("/stripe/verify", protect, async (req: any, res: any) => {
     if (!stripe) {
       return res.status(500).json({
         message:
-          "Stripe is not configured properly. Check STRIPE_SECRET_KEY in your .env file and restart the server.",
+          "Stripe is not configured properly. Check STRIPE_SECRET_KEY in Render environment variables.",
       });
     }
 
@@ -515,7 +595,7 @@ router.post("/stripe/verify", protect, async (req: any, res: any) => {
       providerTransactionId: String(session.payment_intent || session.id),
       providerReference: session.id,
       amount: order.totalAmount || 0,
-      currency: order.currency || "GBP",
+      currency: APP_CURRENCY,
       rawResponse: session,
       createdAt: new Date(),
     });
@@ -576,7 +656,7 @@ router.post("/:id/esewa", protect, async (req: any, res: any) => {
       providerTransactionId: transactionUuid,
       providerReference: transactionUuid,
       amount: order.totalAmount || 0,
-      currency: order.currency || "GBP",
+      currency: APP_CURRENCY,
       createdAt: new Date(),
     });
 
@@ -594,10 +674,10 @@ router.post("/:id/esewa", protect, async (req: any, res: any) => {
         product_delivery_charge: 0,
         success_url:
           process.env.ESEWA_SUCCESS_URL ||
-          "http://localhost:5173/payment-success",
+          "http://localhost:3000/payment-success",
         failure_url:
           process.env.ESEWA_FAILURE_URL ||
-          "http://localhost:5173/payment-failed",
+          "http://localhost:3000/payment-failed",
       },
     });
   } catch (error: any) {
@@ -646,7 +726,7 @@ router.post("/:id/khalti", protect, async (req: any, res: any) => {
       status: "INITIATED",
       providerReference: String(order._id),
       amount: order.totalAmount || 0,
-      currency: order.currency || "GBP",
+      currency: APP_CURRENCY,
       createdAt: new Date(),
     });
 
@@ -657,9 +737,9 @@ router.post("/:id/khalti", protect, async (req: any, res: any) => {
       payload: {
         return_url:
           process.env.KHALTI_RETURN_URL ||
-          "http://localhost:5173/payment-success",
+          "http://localhost:3000/payment-success",
         website_url:
-          process.env.KHALTI_WEBSITE_URL || "http://localhost:5173",
+          process.env.KHALTI_WEBSITE_URL || "http://localhost:3000",
         amount: Math.max(1, Math.round(Number(order.totalAmount || 0) * 100)),
         purchase_order_id: String(order._id),
         purchase_order_name: `FoodPal Order #${String(order._id)
