@@ -19,13 +19,6 @@ let stripeClient: Stripe | null = null;
 const APP_CURRENCY = "NPR";
 const STRIPE_CURRENCY = "gbp";
 
-/**
- * Real currency conversion:
- * App stores prices in Nepali Rupees.
- * Stripe charges in GBP.
- * It first tries live exchange rate.
- * If live rate fails, it uses NPR_TO_GBP_RATE from Render/.env.
- */
 const FALLBACK_NPR_TO_GBP_RATE = Number(process.env.NPR_TO_GBP_RATE || 0.0058);
 
 let cachedNprToGbpRate = FALLBACK_NPR_TO_GBP_RATE;
@@ -188,6 +181,85 @@ const emitOrderUpdate = (req: any, order: any) => {
   }
 };
 
+const createStripeSessionForOrder = async (order: any) => {
+  const stripe = getStripeClient();
+
+  if (!stripe) {
+    throw new Error(
+      "Stripe is not configured properly. Check STRIPE_SECRET_KEY in Render environment variables."
+    );
+  }
+
+  const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
+  const conversion = await convertNprToGbpMinorUnit(Number(order.totalAmount || 0));
+
+  const session = await stripe.checkout.sessions.create({
+    payment_method_types: ["card"],
+    mode: "payment",
+    line_items: [
+      {
+        price_data: {
+          currency: STRIPE_CURRENCY,
+          product_data: {
+            name: `FoodPal Order #${String(order._id).slice(-6).toUpperCase()}`,
+            description: `Original amount: Rs. ${Number(order.totalAmount || 0).toFixed(
+              2
+            )} NPR`,
+          },
+          unit_amount: conversion.amountPence,
+        },
+        quantity: 1,
+      },
+    ],
+    success_url: `${clientUrl}/payment-success?orderId=${order._id}&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${clientUrl}/payment-failed?orderId=${order._id}`,
+    metadata: {
+      orderId: String(order._id),
+      customerId: String(order.customer),
+      restaurantId: String(order.restaurant),
+      appCurrency: APP_CURRENCY,
+      appAmountNpr: String(order.totalAmount || 0),
+      stripeCurrency: STRIPE_CURRENCY,
+      nprToGbpRate: String(conversion.rate),
+      stripeAmountGbp: String(conversion.amountGbp),
+      stripeAmountPence: String(conversion.amountPence),
+    },
+  });
+
+  order.paymentMethod = "STRIPE";
+  order.paymentStatus = "INITIATED";
+  order.stripeCheckoutSessionId = session.id;
+  order.paymentReference = session.id;
+
+  order.paymentHistory = order.paymentHistory || [];
+  order.paymentHistory.push({
+    method: "STRIPE",
+    status: "INITIATED",
+    providerTransactionId: session.id,
+    providerReference: session.id,
+    amount: order.totalAmount || 0,
+    currency: APP_CURRENCY,
+    rawResponse: {
+      id: session.id,
+      url: session.url,
+      appAmountNpr: Number(order.totalAmount || 0),
+      stripeCurrency: STRIPE_CURRENCY,
+      stripeAmountPence: conversion.amountPence,
+      stripeAmountGbp: conversion.amountGbp,
+      nprToGbpRate: conversion.rate,
+      payment_status: session.payment_status,
+    },
+    createdAt: new Date(),
+  });
+
+  await order.save();
+
+  return {
+    session,
+    conversion,
+  };
+};
+
 const markOrderPaid = async ({
   order,
   method,
@@ -229,10 +301,7 @@ const markOrderPaid = async ({
   order.trackingEvents = order.trackingEvents || [];
 
   order.trackingEvents.push(
-    addTrackingEvent(
-      "PAYMENT_SUCCESS",
-      `${method} payment completed successfully.`
-    )
+    addTrackingEvent("PAYMENT_SUCCESS", `${method} payment completed successfully.`)
   );
 
   await order.save();
@@ -334,9 +403,7 @@ router.post("/", protect, async (req: any, res: any) => {
       customerNote: customerNote || "",
       deliveryDistanceKm,
       status: "PENDING",
-      trackingEvents: [
-        addTrackingEvent("PENDING", "Order placed successfully."),
-      ],
+      trackingEvents: [addTrackingEvent("PENDING", "Order placed successfully.")],
       paymentHistory: [
         {
           method: finalPaymentMethod,
@@ -368,18 +435,180 @@ router.post("/", protect, async (req: any, res: any) => {
   }
 });
 
-// STRIPE PAYMENT SESSION
-router.post("/:id/create-stripe-session", protect, async (req: any, res: any) => {
+// CREATE ORDER + STRIPE CHECKOUT SESSION
+router.post("/create-checkout-session", protect, async (req: any, res: any) => {
   try {
-    const stripe = getStripeClient();
+    const {
+      items,
+      restaurant,
+      restaurantId,
+      subtotal,
+      total,
+      totalAmount,
+      deliveryFee,
+      serviceFee,
+      platformFee,
+      discountAmount,
+      taxAmount,
+      surgeFee,
+      deliveryAddress,
+      address,
+      phone,
+      paymentMethod,
+      promoCode,
+      customerNote,
+      note,
+    } = req.body;
 
-    if (!stripe) {
-      return res.status(500).json({
-        message:
-          "Stripe is not configured properly. Check STRIPE_SECRET_KEY in Render environment variables.",
+    const finalRestaurantId = restaurant || restaurantId;
+
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({
+        message: "No order items",
       });
     }
 
+    if (!finalRestaurantId) {
+      return res.status(400).json({
+        message:
+          "Restaurant is required. Cart item must include restaurantId before checkout.",
+      });
+    }
+
+    const finalDeliveryAddress = {
+      ...(deliveryAddress || {}),
+      text: deliveryAddress?.text || address || "",
+      phone: deliveryAddress?.phone || phone || "",
+    };
+
+    if (!finalDeliveryAddress.text) {
+      return res.status(400).json({
+        message: "Delivery address is required",
+      });
+    }
+
+    const restaurantDoc: any = await RestaurantModel.findById(finalRestaurantId);
+
+    if (!restaurantDoc) {
+      return res.status(404).json({
+        message: "Restaurant not found",
+      });
+    }
+
+    const finalSubtotal = Number(subtotal || 0);
+    const finalDeliveryFee = Number(deliveryFee || 0);
+    const finalPlatformFee = Number(platformFee ?? serviceFee ?? 0);
+    const finalTotalAmount = Number(
+      totalAmount || total || finalSubtotal + finalDeliveryFee + finalPlatformFee
+    );
+
+    const restaurantAddress = {
+      text: restaurantDoc.address?.text || "",
+      lat: restaurantDoc.address?.lat ?? null,
+      lng: restaurantDoc.address?.lng ?? null,
+      placeId: restaurantDoc.address?.placeId || "",
+    };
+
+    let deliveryDistanceKm = 0;
+
+    if (
+      hasValidCoords(restaurantAddress.lat, restaurantAddress.lng) &&
+      hasValidCoords(finalDeliveryAddress.lat, finalDeliveryAddress.lng)
+    ) {
+      deliveryDistanceKm = Number(
+        calculateDistanceKm(
+          {
+            lat: Number(restaurantAddress.lat),
+            lng: Number(restaurantAddress.lng),
+          },
+          {
+            lat: Number(finalDeliveryAddress.lat),
+            lng: Number(finalDeliveryAddress.lng),
+          }
+        ).toFixed(2)
+      );
+    }
+
+    const finalPaymentMethod = normalizePaymentMethod(paymentMethod);
+
+    const order = await OrderModel.create({
+      customer: req.user._id,
+      restaurant: finalRestaurantId,
+      items,
+      subtotal: finalSubtotal,
+      totalAmount: finalTotalAmount,
+      deliveryFee: finalDeliveryFee,
+      platformFee: finalPlatformFee,
+      discountAmount: Number(discountAmount || 0),
+      taxAmount: Number(taxAmount || 0),
+      surgeFee: Number(surgeFee || 0),
+      currency: APP_CURRENCY,
+      deliveryAddress: finalDeliveryAddress,
+      restaurantAddress,
+      paymentMethod: finalPaymentMethod,
+      paymentStatus: finalPaymentMethod === "CASH" ? "PENDING" : "INITIATED",
+      promoCode: promoCode || "",
+      customerNote: customerNote || note || "",
+      deliveryDistanceKm,
+      status: "PENDING",
+      trackingEvents: [addTrackingEvent("PENDING", "Order placed successfully.")],
+      paymentHistory: [
+        {
+          method: finalPaymentMethod,
+          status: finalPaymentMethod === "CASH" ? "PENDING" : "INITIATED",
+          amount: finalTotalAmount,
+          currency: APP_CURRENCY,
+          createdAt: new Date(),
+        },
+      ],
+    });
+
+    const io = req.app.get("io");
+
+    if (io) {
+      const populatedOrder = await populateOrder(order._id);
+      io.to("admin_room").emit("order:new", populatedOrder);
+      io.to(`restaurant_${finalRestaurantId}`).emit("order:new", populatedOrder);
+      io.to(`user_${req.user._id}`).emit("order:new", populatedOrder);
+    }
+
+    if (finalPaymentMethod === "CASH") {
+      return res.status(201).json({
+        success: true,
+        order,
+        orderId: order._id,
+      });
+    }
+
+    const { session, conversion } = await createStripeSessionForOrder(order);
+
+    return res.status(201).json({
+      success: true,
+      order,
+      orderId: order._id,
+      url: session.url,
+      checkoutUrl: session.url,
+      sessionId: session.id,
+      conversion: {
+        appAmountNpr: Number(order.totalAmount || 0),
+        stripeCurrency: STRIPE_CURRENCY.toUpperCase(),
+        stripeAmountGbp: conversion.amountGbp,
+        stripeAmountPence: conversion.amountPence,
+        nprToGbpRate: conversion.rate,
+      },
+    });
+  } catch (error: any) {
+    console.error("Create checkout session error:", error);
+
+    res.status(500).json({
+      message: error.message || "Failed to create checkout session",
+    });
+  }
+});
+
+// STRIPE PAYMENT SESSION
+router.post("/:id/create-stripe-session", protect, async (req: any, res: any) => {
+  try {
     const order = await OrderModel.findById(req.params.id);
 
     if (!order) {
@@ -402,76 +631,7 @@ router.post("/:id/create-stripe-session", protect, async (req: any, res: any) =>
       });
     }
 
-    const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
-
-    const conversion = await convertNprToGbpMinorUnit(Number(order.totalAmount || 0));
-
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
-      mode: "payment",
-
-      line_items: [
-        {
-          price_data: {
-            currency: STRIPE_CURRENCY,
-            product_data: {
-              name: `FoodPal Order #${String(order._id)
-                .slice(-6)
-                .toUpperCase()}`,
-              description: `Original amount: Rs. ${Number(
-                order.totalAmount || 0
-              ).toFixed(2)} NPR`,
-            },
-            unit_amount: conversion.amountPence,
-          },
-          quantity: 1,
-        },
-      ],
-
-      success_url: `${clientUrl}/payment-success?orderId=${order._id}&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${clientUrl}/payment-failed?orderId=${order._id}`,
-
-      metadata: {
-        orderId: String(order._id),
-        customerId: String(order.customer),
-        restaurantId: String(order.restaurant),
-        appCurrency: APP_CURRENCY,
-        appAmountNpr: String(order.totalAmount || 0),
-        stripeCurrency: STRIPE_CURRENCY,
-        nprToGbpRate: String(conversion.rate),
-        stripeAmountGbp: String(conversion.amountGbp),
-        stripeAmountPence: String(conversion.amountPence),
-      },
-    });
-
-    order.paymentMethod = "STRIPE";
-    order.paymentStatus = "INITIATED";
-    order.stripeCheckoutSessionId = session.id;
-    order.paymentReference = session.id;
-
-    order.paymentHistory = order.paymentHistory || [];
-
-    order.paymentHistory.push({
-      method: "STRIPE",
-      status: "INITIATED",
-      providerTransactionId: session.id,
-      providerReference: session.id,
-      amount: order.totalAmount || 0,
-      currency: APP_CURRENCY,
-      rawResponse: {
-        id: session.id,
-        url: session.url,
-        appAmountNpr: Number(order.totalAmount || 0),
-        stripeCurrency: STRIPE_CURRENCY,
-        stripeAmountPence: conversion.amountPence,
-        stripeAmountGbp: conversion.amountGbp,
-        nprToGbpRate: conversion.rate,
-        payment_status: session.payment_status,
-      },
-      createdAt: new Date(),
-    });
-
-    await order.save();
+    const { session, conversion } = await createStripeSessionForOrder(order);
 
     res.json({
       success: true,
@@ -519,12 +679,6 @@ router.post("/stripe/verify", protect, async (req: any, res: any) => {
 
     if (sessionId) {
       session = await stripe.checkout.sessions.retrieve(sessionId);
-
-      if (!session) {
-        return res.status(400).json({
-          message: "Invalid Stripe payment session",
-        });
-      }
 
       const finalOrderId = session.metadata?.orderId;
 
