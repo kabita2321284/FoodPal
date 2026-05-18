@@ -4,12 +4,15 @@ import { useNavigate } from "react-router-dom";
 type CartItem = {
   _id?: string;
   id?: string;
+  item?: string;
+  menuItem?: string;
   menuItemId?: string;
   name: string;
   price: number;
   quantity: number;
   image?: string;
   restaurantId?: string;
+  restaurant?: string;
 };
 
 const API_URL =
@@ -60,6 +63,14 @@ export default function CheckoutPage() {
   const serviceFee = subtotal > 0 ? 20 : 0;
   const total = subtotal + deliveryFee + serviceFee;
 
+  const getCartItemId = (item: CartItem) => {
+    return item.item || item.menuItem || item.menuItemId || item._id || item.id || "";
+  };
+
+  const getRestaurantId = () => {
+    return cart[0]?.restaurantId || cart[0]?.restaurant || "";
+  };
+
   const handlePlaceOrder = async () => {
     if (cart.length === 0) {
       alert("Your cart is empty.");
@@ -76,6 +87,20 @@ export default function CheckoutPage() {
       return;
     }
 
+    const restaurantId = getRestaurantId();
+
+    if (!restaurantId) {
+      alert("Restaurant ID missing from cart. Please remove item and add it again from restaurant page.");
+      return;
+    }
+
+    const invalidItem = cart.find((cartItem) => !getCartItemId(cartItem));
+
+    if (invalidItem) {
+      alert("Cart item ID missing. Please remove item and add it again.");
+      return;
+    }
+
     try {
       setLoading(true);
 
@@ -85,13 +110,20 @@ export default function CheckoutPage() {
         localStorage.getItem("authToken");
 
       const orderPayload = {
-        items: cart.map((item) => ({
-          menuItem: item.menuItemId || item._id || item.id,
-          name: item.name,
-          price: Number(item.price),
-          quantity: Number(item.quantity || 1),
-          image: item.image || "",
-        })),
+        items: cart.map((cartItem) => {
+          const finalItemId = getCartItemId(cartItem);
+
+          return {
+            item: finalItemId,
+            menuItem: finalItemId,
+            name: cartItem.name,
+            price: Number(cartItem.price || 0),
+            quantity: Number(cartItem.quantity || 1),
+            image: cartItem.image || "",
+          };
+        }),
+        restaurant: restaurantId,
+        restaurantId,
         deliveryAddress: {
           text: address,
           phone,
@@ -99,14 +131,16 @@ export default function CheckoutPage() {
         address,
         phone,
         note,
+        customerNote: note,
         paymentMethod,
         currency,
         baseCurrency: "NPR",
         subtotal,
         deliveryFee,
         serviceFee,
+        platformFee: serviceFee,
         total,
-        restaurantId: cart[0]?.restaurantId,
+        totalAmount: total,
       };
 
       const response = await fetch(`${API_URL}/api/orders/create-checkout-session`, {
@@ -137,7 +171,7 @@ export default function CheckoutPage() {
       if (data.order?._id || data.orderId) {
         localStorage.removeItem("cart");
         localStorage.removeItem("foodpal_cart");
-        navigate(`/orders/${data.order?._id || data.orderId}`);
+        navigate(`/order/${data.order?._id || data.orderId}/track`);
         return;
       }
 
@@ -235,13 +269,16 @@ export default function CheckoutPage() {
               <div className="space-y-3">
                 {cart.map((item, index) => (
                   <div
-                    key={item._id || item.id || index}
+                    key={getCartItemId(item) || index}
                     className="flex justify-between border-b pb-2 text-sm"
                   >
                     <span>
                       {item.name} x {item.quantity || 1}
                     </span>
-                    <span>Rs {Number(item.price || 0) * Number(item.quantity || 1)}</span>
+                    <span>
+                      Rs{" "}
+                      {Number(item.price || 0) * Number(item.quantity || 1)}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -269,8 +306,7 @@ export default function CheckoutPage() {
               </div>
 
               <p className="text-xs text-gray-500">
-                Base currency is NPR. Stripe will charge in selected currency:
-                {" "}
+                Base currency is NPR. Stripe will charge in selected currency:{" "}
                 <b>{currency}</b>.
               </p>
             </div>
