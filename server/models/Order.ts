@@ -670,12 +670,14 @@ const OrderSchema = new mongoose.Schema(
   }
 );
 
-OrderSchema.pre("validate", function (next) {
+OrderSchema.pre("validate", function () {
   const order: any = this;
 
   order.currency = String(order.currency || "NPR").toUpperCase();
   order.baseCurrency = String(order.baseCurrency || "NPR").toUpperCase();
-  order.paymentCurrency = String(order.paymentCurrency || order.currency || "NPR").toUpperCase();
+  order.paymentCurrency = String(
+    order.paymentCurrency || order.currency || "NPR"
+  ).toUpperCase();
 
   order.subtotal = Number(order.subtotal || 0);
   order.deliveryFee = Number(order.deliveryFee || 0);
@@ -706,8 +708,6 @@ OrderSchema.pre("validate", function (next) {
       convertedAt: new Date(),
     };
   }
-
-  next();
 });
 
 OrderSchema.index({ customer: 1, createdAt: -1 });
