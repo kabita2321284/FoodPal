@@ -1,401 +1,290 @@
-import dotenv from "dotenv";
-dotenv.config();
-import favoriteRoutes from "./server/routes/favoriteRoutes.js";
-import reviewRoutes from "./server/routes/reviewRoutes.js";
-import promoRoutes from "./server/routes/promoRoutes.js";
-import express from "express";
-import { createServer } from "http";
-import { Server } from "socket.io";
-import path from "path";
-import { fileURLToPath } from "url";
-import { createServer as createViteServer } from "vite";
-import cors from "cors";
+import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
-import connectDB from "./server/config/db.js";
-import authRoutes from "./server/routes/authRoutes.js";
-import userRoutes from "./server/routes/userRoutes.js";
-import restaurantRoutes from "./server/routes/restaurantRoutes.js";
-import orderRoutes from "./server/routes/orderRoutes.js";
-import seedRoutes from "./server/routes/seedRoutes.js";
-import uploadRoutes from "./server/routes/uploadRoutes.js";
-import adminRoutes from "./server/routes/adminRoutes.js";
-import riderRoutes from "./server/routes/riderRoutes.js";
-import { seedAdmin } from "./server/utils/seedAdmin.js";
+type CartItem = {
+  _id?: string;
+  id?: string;
+  menuItemId?: string;
+  name: string;
+  price: number;
+  quantity: number;
+  image?: string;
+  restaurantId?: string;
+};
 
+const API_URL =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.PROD ? "" : "http://localhost:3000");
 
-connectDB().then(() => {
-  seedAdmin();
-});
+const supportedCurrencies = [
+  { code: "NPR", label: "NPR - Nepalese Rupee" },
+  { code: "GBP", label: "GBP - British Pound" },
+  { code: "USD", label: "USD - US Dollar" },
+  { code: "EUR", label: "EUR - Euro" },
+  { code: "INR", label: "INR - Indian Rupee" },
+  { code: "AUD", label: "AUD - Australian Dollar" },
+  { code: "CAD", label: "CAD - Canadian Dollar" },
+  { code: "AED", label: "AED - UAE Dirham" },
+  { code: "JPY", label: "JPY - Japanese Yen" },
+];
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+export default function CheckoutPage() {
+  const navigate = useNavigate();
 
-const allowedOrigins = [
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "http://127.0.0.1:3000",
-  "http://127.0.0.1:5173",
-  process.env.CLIENT_URL,
-].filter(Boolean) as string[];
+  const [currency, setCurrency] = useState("GBP");
+  const [address, setAddress] = useState("");
+  const [phone, setPhone] = useState("");
+  const [note, setNote] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("stripe");
+  const [loading, setLoading] = useState(false);
 
-const socketCorsOrigin =
-  process.env.NODE_ENV === "production" ? allowedOrigins : "*";
+  const cart: CartItem[] = useMemo(() => {
+    try {
+      const savedCart =
+        localStorage.getItem("cart") ||
+        localStorage.getItem("foodpal_cart") ||
+        "[]";
 
-const buildRoom = (prefix: string, id: string) => `${prefix}_${id}`;
+      return JSON.parse(savedCart);
+    } catch {
+      return [];
+    }
+  }, []);
 
-async function startServer() {
-  const app = express();
-  const httpServer = createServer(app);
-
-  const io = new Server(httpServer, {
-    cors: {
-      origin: socketCorsOrigin,
-      methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
-      credentials: true,
-    },
-    transports: ["websocket", "polling"],
-  });
-
-  const PORT = Number(process.env.PORT) || 3000;
-
-  app.set("io", io);
-
-  app.use(
-    cors({
-      origin: process.env.NODE_ENV === "production" ? allowedOrigins : "*",
-      methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
-      credentials: true,
-    })
+  const subtotal = cart.reduce(
+    (sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 1),
+    0
   );
 
-  // Stripe webhook needs raw body BEFORE express.json()
-  app.use(
-    "/api/payments/stripe/webhook",
-    express.raw({ type: "application/json" })
-  );
+  const deliveryFee = subtotal > 0 ? 50 : 0;
+  const serviceFee = subtotal > 0 ? 20 : 0;
+  const total = subtotal + deliveryFee + serviceFee;
 
-  app.use(express.json({ limit: "10mb" }));
-  app.use(express.urlencoded({ extended: true }));
-  app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+  const handlePlaceOrder = async () => {
+    if (cart.length === 0) {
+      alert("Your cart is empty.");
+      return;
+    }
 
-  app.get("/api/health", (_req, res) => {
-    res.json({
-      status: "ok",
-      message: "FoodPal Server is running",
-      socket: "enabled",
-      payment: "enabled",
-      time: new Date().toISOString(),
-    });
-  });
+    if (!address.trim()) {
+      alert("Please enter delivery address.");
+      return;
+    }
 
-  app.use("/api/favorites", favoriteRoutes);
-  app.use("/api/reviews", reviewRoutes);
-  app.use("/api/promos", promoRoutes);
-  app.use("/api/auth", authRoutes);
-  app.use("/api/users", userRoutes);
-  app.use("/api/restaurants", restaurantRoutes);
-  app.use("/api/orders", orderRoutes);
-  app.use("/api/seed", seedRoutes);
-  app.use("/api/uploads", uploadRoutes);
-  app.use("/api/admin", adminRoutes);
-  app.use("/api/riders", riderRoutes);
+    if (!phone.trim()) {
+      alert("Please enter phone number.");
+      return;
+    }
 
-  app.use("/api", (req, res) => {
-    console.log(`API 404: ${req.method} ${req.originalUrl}`);
-    res.status(404).json({
-      success: false,
-      message: `API route not found: ${req.method} ${req.originalUrl}`,
-    });
-  });
+    try {
+      setLoading(true);
 
-  app.use((err: any, _req: any, res: any, _next: any) => {
-    console.error("Internal Server Error:", err);
-    res.status(err.status || 500).json({
-      success: false,
-      message: err.message || "Internal Server Error",
-      code: err.code,
-    });
-  });
+      const token =
+        localStorage.getItem("token") ||
+        localStorage.getItem("foodpal_token") ||
+        localStorage.getItem("authToken");
 
-  io.on("connection", (socket) => {
-    console.log("✅ Socket connected:", socket.id);
-
-    socket.on("user:join", (userId) => {
-      if (!userId) return;
-      socket.join(buildRoom("user", String(userId)));
-      console.log(`Socket ${socket.id} joined user_${userId}`);
-    });
-
-    socket.on("admin:join", () => {
-      socket.join("admin_room");
-      console.log(`Socket ${socket.id} joined admin_room`);
-    });
-
-    socket.on("restaurant:join", (restaurantId) => {
-      if (!restaurantId) return;
-      socket.join(buildRoom("restaurant", String(restaurantId)));
-      console.log(`Socket ${socket.id} joined restaurant_${restaurantId}`);
-    });
-
-    socket.on("rider:join", (riderId) => {
-      if (!riderId) return;
-      socket.join(buildRoom("rider", String(riderId)));
-      socket.join(buildRoom("user", String(riderId)));
-      console.log(`Socket ${socket.id} joined rider_${riderId}`);
-    });
-
-    socket.on("order:join", (orderId) => {
-      if (!orderId) return;
-      socket.join(buildRoom("order", String(orderId)));
-      console.log(`Socket ${socket.id} joined order_${orderId}`);
-    });
-
-    socket.on("order:leave", (orderId) => {
-      if (!orderId) return;
-      socket.leave(buildRoom("order", String(orderId)));
-      console.log(`Socket ${socket.id} left order_${orderId}`);
-    });
-
-    socket.on("payment:completed", (data) => {
-      const { orderId, userId, restaurantId, paymentMethod } = data || {};
-
-      const payload = {
-        ...data,
-        paymentStatus: "paid",
-        updatedAt: new Date(),
+      const orderPayload = {
+        items: cart.map((item) => ({
+          menuItem: item.menuItemId || item._id || item.id,
+          name: item.name,
+          price: Number(item.price),
+          quantity: Number(item.quantity || 1),
+          image: item.image || "",
+        })),
+        deliveryAddress: {
+          text: address,
+          phone,
+        },
+        address,
+        phone,
+        note,
+        paymentMethod,
+        currency,
+        baseCurrency: "NPR",
+        subtotal,
+        deliveryFee,
+        serviceFee,
+        total,
+        restaurantId: cart[0]?.restaurantId,
       };
 
-      if (orderId) {
-        io.to(buildRoom("order", String(orderId))).emit(
-          "payment:completed",
-          payload
-        );
-        io.to(buildRoom("order", String(orderId))).emit(
-          "order:updated",
-          payload
-        );
-      }
-
-      io.to("admin_room").emit("payment:completed", payload);
-      io.to("admin_room").emit("order:updated", payload);
-
-      if (userId) {
-        io.to(buildRoom("user", String(userId))).emit("notification", {
-          title: "Payment Successful",
-          message: `Your ${paymentMethod || "payment"} payment was successful.`,
-          orderId,
-          createdAt: new Date(),
-        });
-      }
-
-      if (restaurantId) {
-        io.to(buildRoom("restaurant", String(restaurantId))).emit(
-          "order:updated",
-          payload
-        );
-      }
-    });
-
-    socket.on("rider:availability_update", (data) => {
-      const { riderId, userId, isAvailable, isBusy, currentLocation } =
-        data || {};
-
-      const payload = {
-        riderId,
-        userId,
-        isAvailable: Boolean(isAvailable),
-        isBusy: Boolean(isBusy),
-        currentLocation,
-        updatedAt: new Date(),
-      };
-
-      io.to("admin_room").emit("rider:availability_update", payload);
-
-      if (userId) {
-        io.to(buildRoom("user", String(userId))).emit(
-          "rider:availability_update",
-          payload
-        );
-      }
-    });
-
-    socket.on("rider:location_update", (data) => {
-      const {
-        orderId,
-        riderId,
-        lat,
-        lng,
-        accuracy,
-        heading,
-        speed,
-        updatedAt,
-      } = data || {};
-
-      if (!orderId || lat === undefined || lng === undefined) return;
-
-      const payload = {
-        orderId,
-        riderId,
-        lat: Number(lat),
-        lng: Number(lng),
-        accuracy: accuracy ?? null,
-        heading: heading ?? null,
-        speed: speed ?? null,
-        updatedAt: updatedAt || new Date(),
-      };
-
-      io.to(buildRoom("order", String(orderId))).emit(
-        "rider:location_update",
-        payload
-      );
-
-      io.to("admin_room").emit("rider:location_update", payload);
-
-      if (riderId) {
-        io.to(buildRoom("rider", String(riderId))).emit(
-          "rider:location_update",
-          payload
-        );
-      }
-
-      console.log(
-        `📍 Rider location updated for order_${orderId}:`,
-        payload.lat,
-        payload.lng
-      );
-    });
-
-    socket.on("order:update_status", (data) => {
-      const { orderId, status, userId, customerId, restaurantId, riderId } =
-        data || {};
-
-      if (!orderId || !status) return;
-
-      const payload = {
-        ...data,
-        updatedAt: new Date(),
-      };
-
-      io.to(buildRoom("order", String(orderId))).emit(
-        "order:status_update",
-        payload
-      );
-
-      io.to("admin_room").emit("order:updated", payload);
-
-      const finalUserId = userId || customerId;
-
-      if (finalUserId) {
-        io.to(buildRoom("user", String(finalUserId))).emit("notification", {
-          title: "Order Update",
-          message: `Your order is now ${String(status).replaceAll("_", " ")}`,
-          orderId,
-        });
-      }
-
-      if (restaurantId) {
-        io.to(buildRoom("restaurant", String(restaurantId))).emit(
-          "order:updated",
-          payload
-        );
-      }
-
-      if (riderId) {
-        io.to(buildRoom("rider", String(riderId))).emit(
-          "order:updated",
-          payload
-        );
-        io.to(buildRoom("user", String(riderId))).emit(
-          "order:updated",
-          payload
-        );
-      }
-
-      console.log(`🔄 Order ${orderId} updated to ${status}`);
-    });
-
-    socket.on("order:assigned", (data) => {
-      const { orderId, riderId, customerId, restaurantId } = data || {};
-
-      if (!orderId) return;
-
-      const payload = {
-        ...data,
-        updatedAt: new Date(),
-      };
-
-      io.to(buildRoom("order", String(orderId))).emit("order:assigned", payload);
-      io.to("admin_room").emit("order:updated", payload);
-
-      if (customerId) {
-        io.to(buildRoom("user", String(customerId))).emit("notification", {
-          title: "Rider Assigned",
-          message: "A rider has been assigned to your order.",
-          orderId,
-        });
-      }
-
-      if (restaurantId) {
-        io.to(buildRoom("restaurant", String(restaurantId))).emit(
-          "order:updated",
-          payload
-        );
-      }
-
-      if (riderId) {
-        io.to(buildRoom("rider", String(riderId))).emit(
-          "order:assigned",
-          payload
-        );
-        io.to(buildRoom("user", String(riderId))).emit("notification", {
-          title: "New Delivery Assigned",
-          message: "A new delivery has been assigned to you.",
-          orderId,
-        });
-      }
-    });
-
-    socket.on("notification:send", (data) => {
-      const { userId, title, message, orderId } = data || {};
-
-      if (!userId) return;
-
-      io.to(buildRoom("user", String(userId))).emit("notification", {
-        title: title || "FoodPal Notification",
-        message: message || "",
-        orderId,
-        createdAt: new Date(),
+      const response = await fetch(`${API_URL}/api/orders/create-checkout-session`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(orderPayload),
       });
-    });
 
-    socket.on("disconnect", () => {
-      console.log("❌ Socket disconnected:", socket.id);
-    });
-  });
+      const data = await response.json();
 
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
+      if (!response.ok) {
+        throw new Error(data.message || "Failed to create order.");
+      }
 
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
+      if (data.url) {
+        window.location.href = data.url;
+        return;
+      }
 
-    app.get("*", (_req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
+      if (data.checkoutUrl) {
+        window.location.href = data.checkoutUrl;
+        return;
+      }
 
-  httpServer.listen(PORT, "0.0.0.0", () => {
-    console.log(`FoodPal running on http://localhost:${PORT}`);
-    console.log("Socket.IO live tracking enabled");
-    console.log("Payments enabled: Stripe + Khalti + eSewa");
-  });
+      if (data.order?._id || data.orderId) {
+        localStorage.removeItem("cart");
+        localStorage.removeItem("foodpal_cart");
+        navigate(`/orders/${data.order?._id || data.orderId}`);
+        return;
+      }
+
+      alert("Order created successfully.");
+      navigate("/");
+    } catch (error: any) {
+      console.error("Checkout error:", error);
+      alert(error.message || "Something went wrong during checkout.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50 px-4 py-8">
+      <div className="mx-auto max-w-5xl">
+        <h1 className="mb-6 text-3xl font-bold text-gray-900">Checkout</h1>
+
+        <div className="grid gap-6 md:grid-cols-3">
+          <div className="md:col-span-2 space-y-6">
+            <div className="rounded-2xl bg-white p-6 shadow">
+              <h2 className="mb-4 text-xl font-semibold">Delivery Details</h2>
+
+              <label className="mb-2 block text-sm font-medium">
+                Delivery Address
+              </label>
+              <textarea
+                className="mb-4 w-full rounded-xl border p-3 outline-none focus:border-orange-500"
+                rows={3}
+                placeholder="Enter full delivery address"
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+              />
+
+              <label className="mb-2 block text-sm font-medium">
+                Phone Number
+              </label>
+              <input
+                className="mb-4 w-full rounded-xl border p-3 outline-none focus:border-orange-500"
+                placeholder="Enter phone number"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+              />
+
+              <label className="mb-2 block text-sm font-medium">
+                Order Note
+              </label>
+              <textarea
+                className="w-full rounded-xl border p-3 outline-none focus:border-orange-500"
+                rows={2}
+                placeholder="Optional note for restaurant or rider"
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+              />
+            </div>
+
+            <div className="rounded-2xl bg-white p-6 shadow">
+              <h2 className="mb-4 text-xl font-semibold">Payment</h2>
+
+              <label className="mb-2 block text-sm font-medium">
+                Payment Currency
+              </label>
+              <select
+                className="mb-4 w-full rounded-xl border p-3 outline-none focus:border-orange-500"
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value)}
+              >
+                {supportedCurrencies.map((item) => (
+                  <option key={item.code} value={item.code}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+
+              <label className="mb-2 block text-sm font-medium">
+                Payment Method
+              </label>
+              <select
+                className="w-full rounded-xl border p-3 outline-none focus:border-orange-500"
+                value={paymentMethod}
+                onChange={(e) => setPaymentMethod(e.target.value)}
+              >
+                <option value="stripe">Stripe Card Payment</option>
+                <option value="cash">Cash on Delivery</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="rounded-2xl bg-white p-6 shadow h-fit">
+            <h2 className="mb-4 text-xl font-semibold">Order Summary</h2>
+
+            {cart.length === 0 ? (
+              <p className="text-gray-500">Your cart is empty.</p>
+            ) : (
+              <div className="space-y-3">
+                {cart.map((item, index) => (
+                  <div
+                    key={item._id || item.id || index}
+                    className="flex justify-between border-b pb-2 text-sm"
+                  >
+                    <span>
+                      {item.name} x {item.quantity || 1}
+                    </span>
+                    <span>Rs {Number(item.price || 0) * Number(item.quantity || 1)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="mt-5 space-y-2 text-sm">
+              <div className="flex justify-between">
+                <span>Subtotal</span>
+                <span>Rs {subtotal}</span>
+              </div>
+
+              <div className="flex justify-between">
+                <span>Delivery Fee</span>
+                <span>Rs {deliveryFee}</span>
+              </div>
+
+              <div className="flex justify-between">
+                <span>Service Fee</span>
+                <span>Rs {serviceFee}</span>
+              </div>
+
+              <div className="flex justify-between border-t pt-3 text-lg font-bold">
+                <span>Total</span>
+                <span>Rs {total}</span>
+              </div>
+
+              <p className="text-xs text-gray-500">
+                Base currency is NPR. Stripe will charge in selected currency:
+                {" "}
+                <b>{currency}</b>.
+              </p>
+            </div>
+
+            <button
+              onClick={handlePlaceOrder}
+              disabled={loading || cart.length === 0}
+              className="mt-6 w-full rounded-xl bg-orange-500 px-4 py-3 font-semibold text-white hover:bg-orange-600 disabled:cursor-not-allowed disabled:bg-gray-400"
+            >
+              {loading ? "Processing..." : "Place Order"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
-
-startServer().catch((err) => {
-  console.error("Failed to start server:", err);
-});
